@@ -64,7 +64,12 @@ def _prev_weekday(day: date) -> date:
 
 # Curated for the hackathon window. Verified dates override anything a library
 # guesses, because a wrong earnings date is worse than no earnings date.
-# VERIFY EACH OF THESE against the company IR page before trading it.
+# VERIFIED 27 Aug 2026:
+#   PANW - confirmed Tue 1 Sep, after close (company IR + press release).
+#   MDT  - date confirmed Tue 1 Sep; the before-open timing is INFERRED from
+#          Medtronic's consistent history of reporting pre-market. If CRUSH is
+#          about to trade MDT, re-check the timing first: a wrong session puts
+#          the position on a day late and the entire edge is gone.
 HACKATHON_WINDOW: tuple[EarningsEvent, ...] = (
     EarningsEvent("PANW", date(2026, 9, 1), Timing.AFTER_CLOSE),
     EarningsEvent("MDT", date(2026, 9, 1), Timing.BEFORE_OPEN),

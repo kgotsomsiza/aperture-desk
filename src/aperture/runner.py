@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
+from .identity import WrongAccountError
 from .loop import DEADLINE, build_strategies, run_cycle
 from .marketdata import MarketData
 from .risk import RiskLimits
@@ -103,7 +104,9 @@ class Runner:
                 return self._until_open(clock)
 
             summary = run_cycle(
-                self.cli, self.md, warden, state, build_strategies(), dry_run=self.args.dry_run
+                self.cli, self.md, warden, state, build_strategies(),
+                dry_run=self.args.dry_run,
+                require_expected=not self.args.dry_run,
             )
             log.info(
                 "cycle: %d approved (%d submitted), %d vetoed, %d closed%s",
@@ -113,6 +116,13 @@ class Runner:
             )
             self.consecutive_failures = 0
             return self.args.interval
+
+        except WrongAccountError:
+            # Never retry this. Staying alive is the runner's job, but not while
+            # aimed at the wrong account.
+            log.critical("WRONG ACCOUNT - refusing to trade", exc_info=True)
+            self.stopping = True
+            raise
 
         except Exception as exc:  # noqa: BLE001 - staying alive is the whole job
             self.consecutive_failures += 1

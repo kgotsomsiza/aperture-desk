@@ -31,8 +31,10 @@ from zoneinfo import ZoneInfo
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side
 from .earnings import EarningsCalendar
+from .identity import WrongAccountError, check as check_account
 from .marketdata import MarketData, Snapshot
-from .risk import BookState, Proposal, RiskLimits, analyse_payoff
+from .contracts import PositionIntent
+from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
 from .state import DeskState, OpenTrade
 from .strategies import carry, crush, drift
 from .strategies.base import Strategy, structure_price
@@ -55,8 +57,19 @@ def build_strategies() -> list[Strategy]:
     ]
 
 
-def build_book(cli: AlpacaCLI, state: DeskState, now: datetime) -> BookState:
+def build_book(
+    cli: AlpacaCLI, state: DeskState, now: datetime, *, require_expected: bool = False
+) -> BookState:
     account = cli.account()
+
+    # Identity before anything else. Every number below is meaningless, and
+    # every order dangerous, if this is not the account we think it is.
+    state.account_fingerprint = check_account(
+        account,
+        recorded=state.account_fingerprint or None,
+        require_expected=require_expected,
+    )
+
     equity = float(account.get("equity") or 0.0)
     state.observe_equity(equity, now.date())
 
@@ -108,6 +121,7 @@ def run_cycle(
     strategies: Sequence[Strategy],
     *,
     dry_run: bool = False,
+    require_expected: bool = False,
 ) -> dict:
     now = datetime.now(ET)
     summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0, "breached": None}
@@ -117,7 +131,7 @@ def run_cycle(
         log.info("market closed; next open %s", clock.get("next_open"))
         return summary
 
-    book = build_book(cli, state, now)
+    book = build_book(cli, state, now, require_expected=require_expected)
     log.info(
         "equity $%s | drawdown %.2f%% | day %+.2f%% | open risk $%s",
         f"{book.equity:,.0f}",
@@ -270,7 +284,7 @@ def manage_exits(
         if dry_run:
             log.info("[dry-run] would close %s: %s", trade.underlying, reason)
             continue
-        if _close_trade(cli, state, warden, trade, reason):
+        if _close_trade(cli, md, state, warden, trade, reason):
             closed += 1
     return closed
 
@@ -289,28 +303,68 @@ def _derisk(
         if dry_run:
             log.info("[dry-run] would de-risk %s", trade.underlying)
             continue
-        if _close_trade(cli, state, warden, trade, "circuit breaker de-risk"):
+        if _close_trade(cli, md, state, warden, trade, "circuit breaker de-risk"):
             closed += 1
     return closed
 
 
-def _close_trade(
-    cli: AlpacaCLI, state: DeskState, warden: RiskWarden, trade: OpenTrade, reason: str
-) -> bool:
-    failures = []
-    for symbol in trade.legs:
-        try:
-            cli.close_position(symbol)
-        except AlpacaCliError as exc:
-            failures.append(f"{symbol}: {exc.stderr[:80]}")
+def build_closing_proposal(trade: OpenTrade, price: float) -> Proposal:
+    """The mirror of an open structure, as one order.
 
-    if failures:
-        # A partial close leaves an unbalanced structure, which is exactly the
-        # state the desk must never sit in silently.
+    Every leg reverses: what was bought is sold to close, what was sold is bought
+    to close. The price mirrors too — a structure opened for a credit is closed
+    for a debit — so the closing limit is the negation of what the structure is
+    worth right now.
+    """
+    legs = []
+    for symbol in trade.legs:
+        opened_side = Side(trade.leg_sides[symbol])
+        if opened_side is Side.BUY:
+            legs.append(Leg(symbol, Side.SELL, 1, PositionIntent.SELL_TO_CLOSE))
+        else:
+            legs.append(Leg(symbol, Side.BUY, 1, PositionIntent.BUY_TO_CLOSE))
+
+    return Proposal(
+        strategy_id=trade.strategy_id,
+        underlying=trade.underlying,
+        legs=tuple(legs),
+        qty=trade.qty,
+        net_price=round(-price + 0.05, 2),  # concede toward the market to get filled
+        rationale=f"closing {trade.client_order_id}",
+    )
+
+
+def _close_trade(
+    cli: AlpacaCLI,
+    md: MarketData,
+    state: DeskState,
+    warden: RiskWarden,
+    trade: OpenTrade,
+    reason: str,
+) -> bool:
+    """Close a structure as ONE multi-leg order.
+
+    Closing leg by leg is how a defined-risk position turns into an undefined one.
+    Alpaca fills each single-leg close independently, and the short legs are the
+    easy ones to fill: lose the race and the desk is left holding naked shorts
+    with the hedge already sold. An mleg close fills all legs or none.
+
+    Verified the hard way on 27 Aug: `position close-all` on a live iron condor
+    closed both shorts and left both longs open.
+    """
+    price = current_structure_price(md, trade)
+    if price is None:
+        log.warning("cannot price %s to close; will retry next cycle", trade.underlying)
+        return False
+
+    proposal = build_closing_proposal(trade, price)
+    try:
+        cli.submit_mleg(proposal, client_order_id=f"close-{trade.client_order_id}"[:128])
+    except AlpacaCliError as exc:
         warden.audit.record(
-            "close_failed", client_order_id=trade.client_order_id, errors=failures
+            "close_failed", client_order_id=trade.client_order_id, error=exc.stderr[:300]
         )
-        log.error("PARTIAL CLOSE on %s — %s", trade.underlying, "; ".join(failures))
+        log.error("CLOSE FAILED on %s - %s", trade.underlying, exc.stderr[:160])
         return False
 
     state.record_close(trade.client_order_id, reason)
@@ -321,7 +375,7 @@ def _close_trade(
         underlying=trade.underlying,
         reason=reason,
     )
-    log.info("CLOSED %s — %s", trade.underlying, reason)
+    log.info("CLOSED %s - %s", trade.underlying, reason)
     return True
 
 

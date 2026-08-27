@@ -385,3 +385,131 @@ def test_write_refuses_to_publish_a_leak(tmp_path):
     with pytest.raises(ValueError):
         write({"account_id": "abc"}, tmp_path / "snapshot.json")
     assert not (tmp_path / "snapshot.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Account identity
+# --------------------------------------------------------------------------- #
+
+
+DEV = {"account_number": "PA3DEVDEVDEV1", "equity": "100000"}
+JUDGED = {"account_number": "PA9JUDGEDJUDG", "equity": "100000"}
+
+
+def test_fingerprint_is_stable_and_not_the_account_number():
+    from aperture.identity import fingerprint
+
+    a = fingerprint("PA3DEVDEVDEV1")
+    assert a == fingerprint("pa3devdevdev1 ")     # case and whitespace insensitive
+    assert a != fingerprint("PA9JUDGEDJUDG")
+    assert "PA3DEV" not in a                       # the number itself never appears
+
+
+def test_fresh_ledger_binds_to_whatever_account_it_first_sees():
+    from aperture.identity import check
+
+    assert check(DEV, recorded=None) == check(DEV, recorded=None)
+
+
+def test_ledger_refuses_a_different_account():
+    """The expensive mistake: resuming the judged account against dev's ledger."""
+    from aperture.identity import WrongAccountError, check, fingerprint
+
+    with pytest.raises(WrongAccountError, match="separate --state file"):
+        check(JUDGED, recorded=fingerprint("PA3DEVDEVDEV1"))
+
+
+def test_expected_account_assertion_catches_the_opposite_mistake():
+    """State file swapped but the keys were not."""
+    from aperture.identity import WrongAccountError, check
+
+    with pytest.raises(WrongAccountError, match="APERTURE_EXPECT_ACCOUNT names"):
+        check(DEV, recorded=None, expected="PA9JUDGEDJUDG")
+    assert check(DEV, recorded=None, expected="PA3DEVDEVDEV1")
+
+
+def test_live_trading_requires_naming_the_account():
+    from aperture.identity import WrongAccountError, check
+
+    with pytest.raises(WrongAccountError, match="not set"):
+        check(DEV, recorded=None, expected=None, require_expected=True)
+
+
+def test_missing_account_identifier_is_an_error_not_a_default():
+    from aperture.identity import WrongAccountError, check
+
+    with pytest.raises(WrongAccountError, match="no account identifier"):
+        check({"equity": "100000"}, recorded=None)
+
+
+def test_environment_variable_is_honoured(monkeypatch):
+    from aperture.identity import WrongAccountError, check
+
+    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA9JUDGEDJUDG")
+    assert check(JUDGED, recorded=None)
+    with pytest.raises(WrongAccountError):
+        check(DEV, recorded=None)
+
+
+def test_fingerprint_persists_through_the_ledger(tmp_path):
+    from aperture.identity import fingerprint
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.account_fingerprint = fingerprint("PA3DEVDEVDEV1")
+    state.save()
+    assert DeskState.load(tmp_path / "d.json").account_fingerprint == fingerprint("PA3DEVDEVDEV1")
+    # And the raw account number is nowhere in the file.
+    assert "PA3DEVDEVDEV1" not in (tmp_path / "d.json").read_text()
+
+
+# --------------------------------------------------------------------------- #
+# Closing a structure
+# --------------------------------------------------------------------------- #
+
+
+def test_closing_proposal_reverses_every_leg():
+    """Closing leg-by-leg is how a defined-risk position becomes an undefined one:
+    Alpaca fills single-leg closes independently, and the shorts fill first."""
+    from aperture.loop import build_closing_proposal
+    from aperture.contracts import PositionIntent
+
+    opened = trade()
+    closing = build_closing_proposal(opened, price=-0.50)
+
+    by_symbol = {l.symbol: l for l in closing.legs}
+    short = by_symbol["SPY260918P00630000"]   # was sold to open
+    long_ = by_symbol["SPY260918P00625000"]   # was bought to open
+
+    assert short.side is Side.BUY
+    assert short.intent is PositionIntent.BUY_TO_CLOSE
+    assert long_.side is Side.SELL
+    assert long_.intent is PositionIntent.SELL_TO_CLOSE
+    assert len(closing.legs) == len(opened.legs)
+    assert closing.qty == opened.qty
+
+
+def test_closing_price_mirrors_the_structure():
+    from aperture.loop import build_closing_proposal
+
+    # Worth -0.50 to hold (a credit structure): closing costs a 0.50 debit,
+    # plus a nickel conceded to get filled.
+    assert build_closing_proposal(trade(), price=-0.50).net_price == pytest.approx(0.55)
+    # A debit structure worth +2.00 is sold back for a 2.00 credit.
+    assert build_closing_proposal(trade(), price=2.00).net_price == pytest.approx(-1.95)
+
+
+def test_closing_an_iron_condor_keeps_all_four_legs_together():
+    four = trade(
+        legs=["SPY260918P00625000", "SPY260918P00630000",
+              "SPY260918C00660000", "SPY260918C00665000"],
+        leg_sides={"SPY260918P00625000": "buy", "SPY260918P00630000": "sell",
+                   "SPY260918C00660000": "sell", "SPY260918C00665000": "buy"},
+    )
+    from aperture.loop import build_closing_proposal
+    closing = build_closing_proposal(four, price=-1.00)
+    assert len(closing.legs) == 4
+    sides = {l.symbol: l.side for l in closing.legs}
+    assert sides["SPY260918P00630000"] is Side.BUY    # short put bought back
+    assert sides["SPY260918C00660000"] is Side.BUY    # short call bought back
+    assert sides["SPY260918P00625000"] is Side.SELL   # long put sold
+    assert sides["SPY260918C00665000"] is Side.SELL   # long call sold
