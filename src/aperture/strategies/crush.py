@@ -124,7 +124,7 @@ class CrushStrategy:
         call, put = pair
 
         bars = md.daily_bars(event.symbol)
-        history = self.calendar.past_dates(event.symbol)
+        history = self.calendar.past_events(event.symbol)
         comparison = compare_moves(
             event.symbol, expiry, call, put, spot, bars, history, asof=today
         )
@@ -169,7 +169,7 @@ class CrushStrategy:
             underlying=comparison.underlying,
             budget=budget,
             slippage=self.config.slippage,
-            rationale=f"SELL event premium — {comparison.explain()}",
+            rationale=f"SELL event premium - {comparison.explain()}",
         )
         if proposal is None or not credit_to_width_ok(proposal, self.config.min_credit_to_width):
             return None
@@ -191,7 +191,7 @@ class CrushStrategy:
             underlying=comparison.underlying,
             budget=budget,
             slippage=self.config.slippage,
-            rationale=f"BUY event premium — {comparison.explain()}",
+            rationale=f"BUY event premium - {comparison.explain()}",
         )
 
 

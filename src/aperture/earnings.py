@@ -105,19 +105,47 @@ class EarningsCalendar:
                 return event
         if not self.use_yfinance:
             return None
-        for day in self._yf_dates(symbol, future=True):
-            if start <= day <= end:
-                return EarningsEvent(symbol, day, Timing.UNKNOWN)
+        for event in self._yf_events(symbol, future=True):
+            if start <= event.report_date <= end:
+                return event
         return None
 
+    def past_events(self, symbol: str, limit: int = 12) -> list[EarningsEvent]:
+        """Historical reports, newest first, WITH their timing.
+
+        Timing is not a detail here. A report after the close moves the next
+        session, so measuring the report date itself captures the day before the
+        news -- pure noise -- and makes every event look far calmer than it was.
+        """
+        events = {e.report_date: e for e in RECENTLY_REPORTED if e.symbol == symbol}
+        for event in self._yf_events(symbol, future=False):
+            events.setdefault(event.report_date, event)
+        return sorted(events.values(), key=lambda e: e.report_date, reverse=True)[:limit]
+
     def past_dates(self, symbol: str, limit: int = 12) -> list[date]:
-        """Historical report dates, newest first — the input to realized moves."""
-        curated = [e.report_date for e in RECENTLY_REPORTED if e.symbol == symbol]
-        return sorted(set(curated + self._yf_dates(symbol, future=False)), reverse=True)[:limit]
+        return [e.report_date for e in self.past_events(symbol, limit)]
 
     # ------------------------------------------------------------------ #
 
-    def _yf_dates(self, symbol: str, *, future: bool) -> list[date]:
+    def _yf_events(self, symbol: str, *, future: bool) -> list[EarningsEvent]:
+        """Report dates with timing inferred from the announcement timestamp.
+
+        Vendors publish earnings times in market hours: a morning stamp is a
+        before-open report, an afternoon one is after the close.
+        """
+        out = []
+        for stamp in self._yf_timestamps(symbol, future=future):
+            hour = stamp.hour
+            if hour == 0:
+                timing = Timing.AFTER_CLOSE  # no time given; AMC is the common case
+            elif hour < 12:
+                timing = Timing.BEFORE_OPEN
+            else:
+                timing = Timing.AFTER_CLOSE
+            out.append(EarningsEvent(symbol, stamp.date(), timing))
+        return out
+
+    def _yf_timestamps(self, symbol: str, *, future: bool):
         if not self.use_yfinance:
             return []
         try:
@@ -136,5 +164,5 @@ class EarningsCalendar:
             return []
 
         today = date.today()
-        days = [stamp.date() for stamp in frame.index.to_pydatetime()]
-        return sorted(d for d in days if (d > today) == future)
+        stamps = list(frame.index.to_pydatetime())
+        return sorted(x for x in stamps if (x.date() > today) == future)

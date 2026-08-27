@@ -416,3 +416,74 @@ def test_token_budget_tracks_and_exhausts():
     assert budget.remaining("fast") == 0
     budget.reset()
     assert budget.remaining("fast") == 100
+
+
+# --------------------------------------------------------------------------- #
+# Regression: the earnings move must be measured on the session that carried it
+# --------------------------------------------------------------------------- #
+
+
+# Real PANW data around its 2 June 2026 report (after the close).
+# The gap was -5.6% on 3 June. The report date itself moved -1.1%.
+PANW_BARS = [
+    {"t": "2026-05-29T00:00:00Z", "c": 281.69},
+    {"t": "2026-06-01T00:00:00Z", "c": 300.48},
+    {"t": "2026-06-02T00:00:00Z", "c": 297.18},   # report date, after close
+    {"t": "2026-06-03T00:00:00Z", "c": 280.43},   # <- the gap
+    {"t": "2026-06-04T00:00:00Z", "c": 279.25},
+]
+
+
+def test_after_close_report_measures_the_next_session_not_the_report_date():
+    """The bug that would have made CRUSH take the wrong side of its own edge.
+
+    Measuring the report date captures the day before the news, which makes every
+    event look calm and pushes the desk into selling premium on events that are
+    actually underpriced.
+    """
+    event = EarningsEvent("PANW", date(2026, 6, 2), Timing.AFTER_CLOSE)
+    moves = realized_earnings_moves(PANW_BARS, [event])
+    assert moves == pytest.approx([abs(280.43 / 297.18 - 1)], rel=1e-6)
+    assert moves[0] == pytest.approx(0.0564, abs=0.0005)   # the real -5.6% gap
+
+    # A bare date, lacking timing, lands on the wrong session. That is exactly
+    # why the API takes events.
+    wrong = realized_earnings_moves(PANW_BARS, [date(2026, 6, 2)])
+    assert wrong[0] == pytest.approx(0.0111, abs=0.0005)   # the -1.1% non-event
+
+
+def test_before_open_report_measures_that_same_session():
+    event = EarningsEvent("PANW", date(2026, 6, 3), Timing.BEFORE_OPEN)
+    moves = realized_earnings_moves(PANW_BARS, [event])
+    assert moves[0] == pytest.approx(0.0564, abs=0.0005)
+
+
+def test_baseline_vol_excludes_the_gap_sessions():
+    """Leave earnings gaps in the baseline and it absorbs the very jumps it is
+    measured against, erasing the event component from the implied move."""
+    from aperture.marketdata import gap_sessions
+
+    # A calm series drifting ~0.1% a day, with one 8% earnings gap dropped in.
+    calm = [
+        {"t": f"2026-04-{day:02d}T00:00:00Z", "c": 100.0 + 0.1 * day}
+        for day in range(1, 29)
+    ]
+    gapped = calm + [
+        {"t": "2026-06-02T00:00:00Z", "c": 102.8},   # report date, after close
+        {"t": "2026-06-03T00:00:00Z", "c": 111.0},   # +8% gap
+        {"t": "2026-06-04T00:00:00Z", "c": 111.1},
+    ]
+    event = EarningsEvent("PANW", date(2026, 6, 2), Timing.AFTER_CLOSE)
+    assert gap_sessions([event]) == [date(2026, 6, 3)]
+
+    with_gap = realized_vol(gapped)
+    without = realized_vol(gapped, exclude=gap_sessions([event]))
+    assert without < with_gap
+    # The gap dominates a calm series, so removing it should cut the baseline hard.
+    assert without < with_gap / 2
+
+
+def test_gap_sessions_accepts_bare_dates_too():
+    from aperture.marketdata import gap_sessions
+
+    assert gap_sessions([date(2026, 6, 2)]) == [date(2026, 6, 2)]

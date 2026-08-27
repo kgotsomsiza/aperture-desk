@@ -395,34 +395,60 @@ def strip_diffusive_vol(total_move: float, dte: int, baseline_annual_vol: float)
     return math.sqrt(max(total_move**2 - diffusive**2, 0.0))
 
 
-def realized_vol(bars: Sequence[dict[str, Any]], window: int = 60) -> float:
-    """Annualised close-to-close volatility."""
-    closes = [float(b["c"]) for b in bars[-(window + 1):] if b.get("c")]
-    if len(closes) < 10:
+def realized_vol(
+    bars: Sequence[dict[str, Any]],
+    window: int = 60,
+    exclude: Sequence[date] | None = None,
+) -> float:
+    """Annualised close-to-close volatility, optionally excluding event sessions.
+
+    The baseline is meant to represent ordinary day-to-day movement, so earnings
+    gaps must come out of it. Leave them in and the baseline absorbs the very
+    jumps it is supposed to be measured against, which then gets subtracted from
+    the implied move and erases the event component the desk is trying to price.
+    """
+    skip = set(exclude or ())
+    recent = [b for b in bars[-(window + 1):] if b.get("c")]
+    if len(recent) < 10:
         return 0.0
-    returns = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0]
+
+    returns = []
+    for previous, current in zip(recent, recent[1:]):
+        if _parse_ts(current.get("t")).date() in skip:
+            continue
+        a, b = float(previous["c"]), float(current["c"])
+        if a > 0:
+            returns.append(math.log(b / a))
+
     if len(returns) < 2:
         return 0.0
     return statistics.stdev(returns) * math.sqrt(TRADING_DAYS_PER_YEAR)
 
 
 def realized_earnings_moves(
-    bars: Sequence[dict[str, Any]], event_dates: Sequence[date], max_events: int = 8
+    bars: Sequence[dict[str, Any]], events: Sequence[Any], max_events: int = 8
 ) -> list[float]:
-    """Absolute overnight move across each past earnings date.
+    """Absolute move across each past announcement, on the session that carried it.
 
-    Measured close-before to close-after, which is how the move is quoted and how
-    the straddle prices it.
+    Takes events rather than bare dates, because a report date alone does not
+    identify the right session. A company reporting after the close on Tuesday
+    moves on Wednesday, so measuring Tuesday captures the day before the news.
+
+    Verified against PANW's 2 June 2026 report: the gap was -5.6% on 3 June,
+    while the report date itself moved -1.1%. Measuring the wrong session makes
+    every event look calm, which would push the desk into selling premium on
+    events that are in fact underpriced.
     """
     by_date: dict[date, int] = {}
     for index, bar in enumerate(bars):
-        stamp = _parse_ts(bar.get("t")).date()
-        by_date[stamp] = index
+        if bar.get("c"):
+            by_date[_parse_ts(bar.get("t")).date()] = index
 
     ordered = sorted(by_date)
     moves: list[float] = []
-    for event in sorted(event_dates, reverse=True)[:max_events]:
-        after = next((d for d in ordered if d >= event), None)
+    for event in sorted(events, key=_report_date, reverse=True)[:max_events]:
+        session = getattr(event, "first_session_after", None) or _report_date(event)
+        after = next((d for d in ordered if d >= session), None)
         if after is None:
             continue
         index = by_date[after]
@@ -435,6 +461,15 @@ def realized_earnings_moves(
     return moves
 
 
+def _report_date(event: Any) -> date:
+    return getattr(event, "report_date", event)
+
+
+def gap_sessions(events: Sequence[Any]) -> list[date]:
+    """Sessions that carried each announcement, excluded from baseline vol."""
+    return [getattr(e, "first_session_after", None) or _report_date(e) for e in events]
+
+
 def compare_moves(
     underlying: str,
     expiry: date,
@@ -442,18 +477,19 @@ def compare_moves(
     put: Snapshot,
     spot: float,
     bars: Sequence[dict[str, Any]],
-    event_dates: Sequence[date],
+    events: Sequence[Any],
     *,
     asof: date | None = None,
 ) -> MoveComparison | None:
     """Assemble the full implied-versus-realized picture for one earnings event."""
-    moves = realized_earnings_moves(bars, event_dates)
+    moves = realized_earnings_moves(bars, events)
     if len(moves) < 4:
         return None  # too little history to claim an edge
 
     asof = asof or date.today()
     total = implied_total_move(call, put, spot)
-    event_move = strip_diffusive_vol(total, (expiry - asof).days, realized_vol(bars))
+    baseline = realized_vol(bars, exclude=gap_sessions(events))
+    event_move = strip_diffusive_vol(total, (expiry - asof).days, baseline)
     median = statistics.median(moves)
     if median <= 0 or event_move <= 0:
         return None
