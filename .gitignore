@@ -28,6 +28,7 @@ logs/
 
 # Runtime data
 state/
+public/
 KILL_SWITCH
 
 # OS metadata

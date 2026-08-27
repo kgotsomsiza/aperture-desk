@@ -294,3 +294,90 @@ def test_dry_run_is_not_counted_as_a_veto(tmp_path, monkeypatch):
 
     assert _submit_if_approved(None, FakeMD(), warden, DeskState(path=tmp_path / "d.json"),
                                book, proposal, dry_run=True) == "dry_run"
+
+
+# --------------------------------------------------------------------------- #
+# Public snapshot
+# --------------------------------------------------------------------------- #
+
+
+class FakeCLI:
+    """Returns broker payloads that DO contain identifiers, to prove the
+    snapshot's allowlist strips them rather than merely not asking for them."""
+
+    def account(self):
+        return {
+            "id": "8f3a2b1c-9d4e-4a5b-8c7d-1e2f3a4b5c6d",
+            "account_number": "PA0FIXTUREDEV",
+            "equity": "104250.00",
+            "cash": "50000.00",
+        }
+
+    def positions(self):
+        return [{
+            "asset_id": "abc-123", "account_id": "8f3a2b1c-9d4e",
+            "symbol": "SPY260918P00630000", "qty": "-2",
+            "avg_entry_price": "2.50", "current_price": "1.10",
+            "market_value": "-220", "unrealized_pl": "280", "unrealized_plpc": "0.56",
+        }]
+
+    def portfolio_history(self, period="1W", timeframe="1H"):
+        return {"timestamp": [1756900000, 1756903600], "equity": [100000, 104250]}
+
+
+def build_snapshot(tmp_path):
+    from aperture.snapshot import Snapshot as PublicSnapshot
+    from aperture.warden import AuditLog
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.observe_equity(100_000.0, date(2026, 9, 1))
+    state.record_open(trade())
+    state.observe_equity(104_250.0, date(2026, 9, 2))
+
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+    audit.record("veto", strategy="CARRY", underlying="SPY", summary="VETOED liquidity")
+    return PublicSnapshot(state=state, audit=audit, cli=FakeCLI()).build()
+
+
+def test_snapshot_strips_account_identifiers(tmp_path):
+    import json as _json
+    payload = build_snapshot(tmp_path)
+    blob = _json.dumps(payload)
+    assert "PA0FIXTUREDEV" not in blob
+    assert "8f3a2b1c" not in blob
+    assert "asset_id" not in blob
+
+
+def test_snapshot_reports_the_numbers_that_matter(tmp_path):
+    payload = build_snapshot(tmp_path)
+    assert payload["equity"] == 104_250.0
+    assert payload["total_return_pct"] == pytest.approx(4.25)
+    assert payload["high_water_mark"] == 104_250.0
+    assert payload["drawdown_pct"] == 0.0
+    assert payload["counts"]["open"] == 1
+    assert payload["positions"][0]["symbol"] == "SPY260918P00630000"
+
+
+def test_snapshot_attribution_groups_by_strategy(tmp_path):
+    payload = build_snapshot(tmp_path)
+    rows = {r["strategy"]: r for r in payload["attribution"]}
+    assert rows["CARRY"]["open"] == 1
+    assert rows["CARRY"]["risk_at_work"] == 700.0
+
+
+def test_publish_guard_rejects_a_leaked_identifier(tmp_path):
+    from aperture.snapshot import assert_publishable
+
+    assert_publishable(build_snapshot(tmp_path))  # the real one is clean
+    with pytest.raises(ValueError, match="forbidden key"):
+        assert_publishable({"account_number": "PA123", "equity": 1})
+    with pytest.raises(ValueError, match="local path"):
+        assert_publishable({"note": r"C:\Users\someone\desk"})
+
+
+def test_write_refuses_to_publish_a_leak(tmp_path):
+    from aperture.snapshot import write
+
+    with pytest.raises(ValueError):
+        write({"account_id": "abc"}, tmp_path / "snapshot.json")
+    assert not (tmp_path / "snapshot.json").exists()

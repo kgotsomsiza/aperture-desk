@@ -1,0 +1,21 @@
+# Trading loop only. Runs 28 Aug - 4 Sep, then `fly apps destroy`.
+# The dashboard lives on static hosting so its URL outlives this container.
+app = "aperture-desk"
+primary_region = "iad"   # close to Alpaca's us-east infrastructure
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ALPACA_LIVE_TRADE = "false"
+  APERTURE_OPTIONS_FEED = "indicative"
+
+# No [http_service]: this is a worker, not a web app. Nothing to expose, and
+# nothing that restarts it into a fresh machine mid-cycle.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[mounts]
+  source = "desk_state"
+  destination = "/app/state"
