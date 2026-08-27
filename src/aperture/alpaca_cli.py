@@ -115,13 +115,19 @@ class AlpacaCLI:
         strike_gte: float | None = None,
         strike_lte: float | None = None,
         option_type: str | None = None,
-        limit: int = 100,
+        limit: int = 1000,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
-        """Live chain snapshot. Includes greeks and IV where Alpaca can compute them.
+        """One page of a live chain snapshot, with greeks where Alpaca computes them.
 
         ``feed`` defaults to ``indicative`` rather than the CLI's own ``opra``
-        default: OPRA needs a paid data plan, and a free-plan account gets a hard
-        error instead of a fallback.
+        default: OPRA needs a signed agreement and a paid data plan, and an
+        account without one gets a hard 403 rather than a fallback.
+
+        ``limit`` is a hard truncation applied *after* the strike filter, not a
+        page size that preserves the filtered range — a low limit silently
+        returns only the lowest strikes and makes the chain look like it stops
+        far below the money. Callers should paginate; see ``MarketData.chain``.
         """
         args = ["data", "option", "chain", "--underlying-symbol", underlying,
                 "--feed", feed, "--limit", str(limit)]
@@ -132,6 +138,7 @@ class AlpacaCLI:
             ("--strike-price-gte", strike_gte),
             ("--strike-price-lte", strike_lte),
             ("--type", option_type),
+            ("--page-token", page_token),
         ):
             if value is not None:
                 args += [flag, str(value)]
@@ -155,11 +162,17 @@ class AlpacaCLI:
         )
 
     def stock_bars(
-        self, symbols: Sequence[str], start: str, *, timeframe: str = "1Day", limit: int = 1000
+        self, symbol: str, start: str, *, timeframe: str = "1Day", limit: int = 1000
     ) -> dict[str, Any]:
+        """Historical stock bars for ONE symbol.
+
+        The CLI is inconsistent here: ``data bars`` takes a singular ``--symbol``
+        while ``data latest-quotes`` takes a comma-separated ``--symbols``. Passing
+        the wrong one fails with "unknown flag", not a validation message.
+        """
         return self.run(
             "data", "bars",
-            "--symbols", ",".join(symbols),
+            "--symbol", symbol,
             "--start", start,
             "--timeframe", timeframe,
             "--limit", str(limit),

@@ -134,7 +134,24 @@ def analyse_payoff(proposal: Proposal) -> RiskProfile:
     the underlying with kinks only at the strikes, so the extrema live at 0, at a
     strike, or at infinity. Checking the asymptotic slopes tells us whether either
     tail is unbounded.
+
+    **This model is only valid when every leg shares one expiry.** A calendar or
+    diagonal has no single expiry payoff — at the near expiry the far leg still
+    carries time value that depends on volatility, not just on spot. Analysed as
+    if it were a vertical, a same-strike calendar's legs cancel exactly and the
+    structure reports a maximum loss of zero, which is the most dangerous possible
+    wrong answer. So a multi-expiry structure is reported as *undefined* risk and
+    the gates reject it, rather than being silently mispriced.
     """
+    expiries = {parse_occ(leg.symbol).expiry for leg in proposal.legs}
+    if len(expiries) > 1:
+        return RiskProfile(
+            max_loss=None,
+            max_profit=None,
+            net_cash=proposal.net_cash,
+            is_defined_risk=False,
+        )
+
     strikes = sorted({parse_occ(leg.symbol).strike for leg in proposal.legs})
 
     # Sample the kinks plus a point either side of each, so that flat regions and
@@ -288,11 +305,21 @@ def evaluate(
     )
     check("qty_positive", proposal.qty >= 1, f"qty={proposal.qty}")
 
+    expiries = {parse_occ(leg.symbol).expiry for leg in proposal.legs}
+    check(
+        "single_expiry",
+        len(expiries) == 1,
+        f"legs span {len(expiries)} expiries "
+        f"({', '.join(str(e) for e in sorted(expiries))}); the payoff model assumes "
+        "one, and Alpaca rejects uncovered calendars in an mleg order anyway",
+    )
+
     # --- defined risk ----------------------------------------------------- #
     check(
         "defined_risk",
         profile.is_defined_risk,
-        "unbounded loss: an uncovered short call is present",
+        "loss is unbounded or unanalysable: an uncovered short call, "
+        "or legs across multiple expiries",
     )
     max_loss = profile.max_loss_or_inf
 

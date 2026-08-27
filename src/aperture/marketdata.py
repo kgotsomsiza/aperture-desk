@@ -137,7 +137,7 @@ class MarketData:
         if bid > 0 and ask > 0:
             return (bid + ask) / 2
         # IEX can be one-sided outside of active trading; fall back to the last daily close.
-        bars = self.cli.stock_bars([symbol], start=(date.today() - timedelta(days=7)).isoformat())
+        bars = self.cli.stock_bars(symbol, start=(date.today() - timedelta(days=7)).isoformat())
         series = ((bars or {}).get("bars") or {}).get(symbol) or []
         return float(series[-1]["c"]) if series else 0.0
 
@@ -175,9 +175,16 @@ class MarketData:
         option_type: str | None = None,
         strike_band: float | None = None,
         spot: float | None = None,
-        limit: int = 500,
+        limit: int = 1000,
+        max_pages: int = 6,
     ) -> dict[str, Snapshot]:
-        """Live chain, filtered to a DTE window and optionally a strike band."""
+        """Live chain, filtered to a DTE window and optionally a strike band.
+
+        Paginates. The API's ``limit`` truncates the filtered result rather than
+        windowing it, so a single under-sized page returns only the lowest strikes
+        and the chain appears to end far below the money — which silently produces
+        nonsense strike selection rather than an error.
+        """
         today = date.today()
         kwargs: dict[str, Any] = {
             "feed": self.feed,
@@ -193,11 +200,18 @@ class MarketData:
                 kwargs["strike_gte"] = round(reference * (1 - strike_band), 2)
                 kwargs["strike_lte"] = round(reference * (1 + strike_band), 2)
 
-        payload = self.cli.option_chain(underlying, **kwargs)
-        oi_table = self.open_interest(underlying)
+        raw_snapshots: dict[str, Any] = {}
+        page_token: str | None = None
+        for _ in range(max_pages):
+            payload = self.cli.option_chain(underlying, page_token=page_token, **kwargs)
+            raw_snapshots.update((payload or {}).get("snapshots") or {})
+            page_token = (payload or {}).get("next_page_token")
+            if not page_token:
+                break
 
+        oi_table = self.open_interest(underlying)
         snapshots: dict[str, Snapshot] = {}
-        for symbol, raw in ((payload or {}).get("snapshots") or {}).items():
+        for symbol, raw in raw_snapshots.items():
             snap = parse_snapshot(symbol, raw)
             if snap.open_interest < 0 and symbol in oi_table:
                 snap = Snapshot(**{**snap.__dict__, "open_interest": oi_table[symbol]})
@@ -206,7 +220,7 @@ class MarketData:
 
     def daily_bars(self, symbol: str, lookback_days: int = 800) -> list[dict[str, Any]]:
         start = (date.today() - timedelta(days=lookback_days)).isoformat()
-        payload = self.cli.stock_bars([symbol], start=start)
+        payload = self.cli.stock_bars(symbol, start=start)
         return ((payload or {}).get("bars") or {}).get(symbol) or []
 
 

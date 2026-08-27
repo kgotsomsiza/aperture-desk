@@ -44,11 +44,32 @@ class Report:
         return any(status == FAIL for status, _, _ in self.rows)
 
 
-def _first_snapshot(chain: dict[str, Any]) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+def _spot(cli: AlpacaCLI, symbol: str = "SPY") -> float:
+    payload = cli.latest_stock_quote([symbol])
+    quote = ((payload or {}).get("quotes") or {}).get(symbol) or {}
+    bid, ask = float(quote.get("bp", 0) or 0), float(quote.get("ap", 0) or 0)
+    return (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
+
+
+def _nearest_the_money(
+    chain: dict[str, Any], spot: float
+) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    """Sample near the money, never whichever contract happens to come first.
+
+    Chains arrive ordered by strike, so taking the first entry samples the
+    deepest in-the-money contract on the board — where implied volatility is
+    numerically unstable and often simply absent. Probing there reports "no IV
+    available" for an account that has perfectly good IV at the strikes anyone
+    would actually trade.
+    """
     snapshots = (chain or {}).get("snapshots") or {}
-    for symbol, snap in snapshots.items():
-        return symbol, snap
-    return None, None
+    if not snapshots:
+        return None, None
+    if spot <= 0:
+        symbol = next(iter(snapshots))
+        return symbol, snapshots[symbol]
+    symbol = min(snapshots, key=lambda s: abs(parse_occ(s).strike - spot))
+    return symbol, snapshots[symbol]
 
 
 def check_cli(cli: AlpacaCLI, report: Report) -> None:
@@ -120,18 +141,27 @@ def check_data_feed(cli: AlpacaCLI, report: Report) -> str:
     return usable
 
 
-def check_greeks_and_staleness(cli: AlpacaCLI, report: Report, feed: str) -> None:
+def check_greeks_and_staleness(cli: AlpacaCLI, report: Report, feed: str) -> float:
     # Look ~30 days out: greeks are undefined at 0DTE (days-to-expiry in the
     # Black-Scholes denominator), so a near-dated probe would be a false negative.
     start = (date.today() + timedelta(days=21)).isoformat()
     end = (date.today() + timedelta(days=45)).isoformat()
+    spot = _spot(cli)
+    report.add(PASS if spot > 0 else WARN, "underlying spot (IEX)", f"SPY {spot:,.2f}")
+
     chain = cli.option_chain(
-        "SPY", feed=feed, expiration_gte=start, expiration_lte=end, limit=20
+        "SPY", feed=feed, expiration_gte=start, expiration_lte=end,
+        strike_gte=round(spot * 0.9, 2) if spot else None,
+        strike_lte=round(spot * 1.1, 2) if spot else None,
+        limit=1000,
     )
-    symbol, snap = _first_snapshot(chain)
+    snapshots = (chain or {}).get("snapshots") or {}
+    symbol, snap = _nearest_the_money(chain, spot)
     if snap is None:
         report.add(FAIL, "chain snapshot", "no contracts returned for a 21-45 DTE window")
-        return
+        return spot
+
+    report.add(INFO, "chain size near the money", f"{len(snapshots)} contracts within +/-10%")
 
     greeks = snap.get("greeks") or {}
     have = [k for k in ("delta", "gamma", "theta", "vega", "rho") if greeks.get(k) is not None]
@@ -140,11 +170,16 @@ def check_greeks_and_staleness(cli: AlpacaCLI, report: Report, feed: str) -> Non
         "greeks in snapshot",
         f"{symbol}: {', '.join(have) or 'none'}",
     )
-    iv = snap.get("implied_volatility")
+    iv = snap.get("impliedVolatility", snap.get("implied_volatility"))
+    with_iv = sum(
+        1 for r in snapshots.values()
+        if r.get("impliedVolatility", r.get("implied_volatility")) is not None
+    )
     report.add(
-        PASS if iv is not None else WARN,
+        PASS if with_iv else WARN,
         "implied volatility",
-        f"{iv:.4f}" if isinstance(iv, (int, float)) else "absent",
+        (f"{iv:.4f} at the money; " if isinstance(iv, (int, float)) else "absent at the money; ")
+        + f"{with_iv}/{len(snapshots)} contracts carry IV",
     )
 
     quote = snap.get("latestQuote") or snap.get("latest_quote") or {}
@@ -156,7 +191,7 @@ def check_greeks_and_staleness(cli: AlpacaCLI, report: Report, feed: str) -> Non
             "quote staleness",
             f"{age:,.0f}s old — size the risk.max_quote_age_s gate above this",
         )
-        bid, ask = float(quote.get("bp", 0)), float(quote.get("ap", 0))
+        bid, ask = float(quote.get("bp", 0) or 0), float(quote.get("ap", 0) or 0)
         mid = (bid + ask) / 2
         report.add(
             INFO,
@@ -164,16 +199,20 @@ def check_greeks_and_staleness(cli: AlpacaCLI, report: Report, feed: str) -> Non
             f"{symbol} {bid:.2f} x {ask:.2f}"
             + (f"  spread {((ask - bid) / mid):.1%} of mid" if mid > 0 else ""),
         )
+    return spot
 
 
-def check_historical_options(cli: AlpacaCLI, report: Report, feed: str) -> None:
+def check_historical_options(cli: AlpacaCLI, report: Report, feed: str, spot: float) -> None:
     """The backtest gate is only credible if the history is actually there."""
     start = (date.today() + timedelta(days=21)).isoformat()
     end = (date.today() + timedelta(days=45)).isoformat()
     chain = cli.option_chain(
-        "SPY", feed=feed, expiration_gte=start, expiration_lte=end, option_type="call", limit=5
+        "SPY", feed=feed, expiration_gte=start, expiration_lte=end, option_type="call",
+        strike_gte=round(spot * 0.95, 2) if spot else None,
+        strike_lte=round(spot * 1.05, 2) if spot else None,
+        limit=1000,
     )
-    symbol, _ = _first_snapshot(chain)
+    symbol, _ = _nearest_the_money(chain, spot)
     if symbol is None:
         report.add(WARN, "historical option bars", "no contract to probe with")
         return
@@ -189,12 +228,8 @@ def check_historical_options(cli: AlpacaCLI, report: Report, feed: str) -> None:
         report.add(WARN, "historical option bars", exc.stderr[:120])
 
 
-def build_probe_spread(cli: AlpacaCLI, feed: str) -> Proposal | None:
+def build_probe_spread(cli: AlpacaCLI, feed: str, spot: float) -> Proposal | None:
     """A deliberately far-OTM 1-lot put credit spread on SPY, for path testing."""
-    quote = cli.latest_stock_quote(["SPY"])
-    quotes = (quote or {}).get("quotes") or {}
-    spy = quotes.get("SPY") or {}
-    spot = (float(spy.get("bp", 0)) + float(spy.get("ap", 0))) / 2
     if spot <= 0:
         return None
 
@@ -204,16 +239,29 @@ def build_probe_spread(cli: AlpacaCLI, feed: str) -> Proposal | None:
         expiration_gte=(date.today() + timedelta(days=21)).isoformat(),
         expiration_lte=(date.today() + timedelta(days=45)).isoformat(),
         option_type="put",
-        strike_lte=spot * 0.85,
-        limit=50,
+        strike_gte=round(spot * 0.75, 2),
+        strike_lte=round(spot * 0.85, 2),
+        limit=1000,
     )
     symbols = sorted((chain or {}).get("snapshots") or {})
     if len(symbols) < 2:
         return None
 
-    # Two adjacent strikes: sell the higher, buy the lower.
-    parsed = sorted((parse_occ(s) for s in symbols), key=lambda p: p.strike)
-    short_leg, long_leg = parsed[-1], parsed[-2]
+    # Group by expiry FIRST. Sorting the whole chain by strike alone happily
+    # pairs two same-strike contracts from different expiries, which is a
+    # calendar, not a vertical - and the payoff model cannot analyse one.
+    by_expiry: dict[Any, list] = {}
+    for symbol in symbols:
+        parsed = parse_occ(symbol)
+        by_expiry.setdefault(parsed.expiry, []).append(parsed)
+
+    usable = [legs for legs in by_expiry.values() if len(legs) >= 2]
+    if not usable:
+        return None
+    legs = sorted(max(usable, key=len), key=lambda p: p.strike)
+
+    # Two adjacent strikes within that one expiry: sell the higher, buy the lower.
+    short_leg, long_leg = legs[-1], legs[-2]
 
     return Proposal(
         strategy_id="PREFLIGHT",
@@ -228,8 +276,10 @@ def build_probe_spread(cli: AlpacaCLI, feed: str) -> Proposal | None:
     )
 
 
-def check_order_path(cli: AlpacaCLI, report: Report, feed: str, live_test: bool) -> None:
-    proposal = build_probe_spread(cli, feed)
+def check_order_path(
+    cli: AlpacaCLI, report: Report, feed: str, spot: float, live_test: bool
+) -> None:
+    proposal = build_probe_spread(cli, feed, spot)
     if proposal is None:
         report.add(WARN, "mleg order path", "could not build a probe spread from the chain")
         return
@@ -258,13 +308,38 @@ def check_order_path(cli: AlpacaCLI, report: Report, feed: str, live_test: bool)
         order = cli.submit_mleg(proposal)
         order_id = (order or {}).get("id", "?")
         report.add(PASS, "live mleg submit", f"accepted, order {order_id}")
-        report.add(
-            INFO,
-            "verify sign convention",
-            "negative limit_price should show as a CREDIT on the fill",
-        )
     except AlpacaCliError as exc:
         report.add(FAIL, "live mleg submit", exc.stderr[:200])
+        return
+
+    # Clean up after ourselves. A diagnostic that leaves a position open is a
+    # diagnostic that quietly changes the thing it was measuring.
+    try:
+        if order_id != "?":
+            cli.cancel_order(order_id)
+            report.add(PASS, "probe order cancelled", f"order {order_id} withdrawn")
+    except AlpacaCliError as exc:
+        # Already filled is the normal reason a cancel fails here.
+        report.add(WARN, "probe order cancel", f"{exc.stderr[:120]}")
+
+    filled = [
+        p for p in cli.positions()
+        if p.get("symbol") in {leg.symbol for leg in proposal.legs}
+    ]
+    for position in filled:
+        symbol = position["symbol"]
+        try:
+            cli.close_position(symbol)
+            report.add(PASS, "probe position closed", symbol)
+        except AlpacaCliError as exc:
+            report.add(FAIL, "probe position close", f"{symbol}: {exc.stderr[:120]} — CLOSE MANUALLY")
+
+    if filled:
+        report.add(
+            INFO,
+            "sign convention",
+            "check the fill: a negative limit_price must book as a CREDIT",
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -284,9 +359,9 @@ def main(argv: list[str] | None = None) -> int:
     check_account(cli, report)
     check_clock(cli, report)
     feed = check_data_feed(cli, report)
-    check_greeks_and_staleness(cli, report, feed)
-    check_historical_options(cli, report, feed)
-    check_order_path(cli, report, feed, args.live_test)
+    spot = check_greeks_and_staleness(cli, report, feed)
+    check_historical_options(cli, report, feed, spot)
+    check_order_path(cli, report, feed, spot, args.live_test)
 
     print()
     print("FAILED — fix the above before trading." if report.failed else "All critical checks passed.")

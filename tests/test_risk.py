@@ -357,3 +357,47 @@ def test_multiplier_is_always_bounded():
                 DEADLINE - timedelta(days=days), DEADLINE, equity, 100_000
             )
             assert 0.0 <= value <= 1.5
+
+
+# --------------------------------------------------------------------------- #
+# Multi-expiry structures
+# --------------------------------------------------------------------------- #
+
+
+def calendar_proposal() -> Proposal:
+    """Same strike, two expiries. Analysed as a vertical, the legs cancel exactly
+    and it reports zero risk — the most dangerous possible wrong answer."""
+    near = build_occ("SPY", date(2026, 9, 30), Right.PUT, 655)
+    far = build_occ("SPY", date(2026, 10, 2), Right.PUT, 655)
+    return Proposal(
+        strategy_id="PREFLIGHT",
+        underlying="SPY",
+        legs=(
+            Leg(far, Side.SELL, 1, PositionIntent.SELL_TO_OPEN),
+            Leg(near, Side.BUY, 1, PositionIntent.BUY_TO_OPEN),
+        ),
+        qty=1,
+        net_price=-0.05,
+    )
+
+
+def test_calendar_is_not_reported_as_zero_risk():
+    profile = analyse_payoff(calendar_proposal())
+    assert profile.max_loss is None
+    assert not profile.is_defined_risk
+
+
+def test_calendar_is_vetoed_on_both_expiry_and_defined_risk():
+    proposal = calendar_proposal()
+    verdict = evaluate(proposal, fresh_quotes(proposal), healthy_book())
+    assert not verdict.approved
+    gates = {r.gate.split("[")[0] for r in verdict.rejections}
+    assert "single_expiry" in gates
+    assert "defined_risk" in gates
+
+
+def test_single_expiry_structures_still_pass():
+    proposal = condor()
+    verdict = evaluate(proposal, fresh_quotes(proposal), healthy_book())
+    assert verdict.approved
+    assert all(r.gate != "single_expiry" or r.passed for r in verdict.results)
