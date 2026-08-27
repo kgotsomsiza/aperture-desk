@@ -121,7 +121,7 @@ class RiskWarden:
         if verdict.approved:
             log.info("APPROVED %s %s x%d", proposal.strategy_id, proposal.underlying, proposal.qty)
         else:
-            log.warning("VETOED %s %s — %s", proposal.strategy_id, proposal.underlying,
+            log.warning("VETOED %s %s - %s", proposal.strategy_id, proposal.underlying,
                         verdict.audit_line())
 
     # ------------------------------------------------------------------ #

@@ -37,6 +37,10 @@ class StrategyConfig:
     take_profit_pct: float = 0.50  # close at 50% of max profit
     stop_loss_multiple: float = 2.0  # exit at 2x the credit received
     slippage: float = 0.05  # price concession per structure, in dollars
+    # Sized just inside the Warden's own single-trade cap. Without this a
+    # strategy happily proposes its whole budget as one structure and every
+    # proposal is vetoed -- correct, but the desk never trades.
+    max_trade_loss_pct: float = 0.035
     params: dict = field(default_factory=dict)
 
     def child(self, **overrides) -> "StrategyConfig":
@@ -232,6 +236,22 @@ def build_long_strangle(
         net_price=price,
         rationale=rationale,
     )
+
+
+def debit_to_width_ok(proposal: Proposal, maximum: float) -> bool:
+    """Reject debit spreads that cost too much of their own width.
+
+    Paying 80 cents for a one-dollar-wide spread needs the underlying to be right
+    *and* to get there, for a maximum 25% return. The same directional view
+    expressed at 45% of width pays more than twice as much for the same call.
+    """
+    profile = analyse_payoff(proposal)
+    if profile.max_loss is None or profile.max_profit is None:
+        return False
+    width = profile.max_loss + profile.max_profit
+    if width <= 0:
+        return False
+    return (profile.max_loss / width) <= maximum
 
 
 def credit_to_width_ok(proposal: Proposal, minimum: float) -> bool:

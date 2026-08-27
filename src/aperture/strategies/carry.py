@@ -53,7 +53,10 @@ class CarryStrategy:
         if not self.config.enabled or budget <= 0:
             return []
 
-        per_name = budget / max(len(self.config.universe), 1)
+        per_name = min(
+            budget / max(len(self.config.universe), 1),
+            book.equity * self.config.max_trade_loss_pct,
+        )
         proposals: list[Proposal] = []
 
         for underlying in self.config.universe:

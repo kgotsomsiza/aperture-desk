@@ -73,8 +73,10 @@ class LegQuote:
     bid: float
     ask: float
     quote_ts: datetime
-    open_interest: int = 0
+    open_interest: int = -1  # -1 means the feed did not report it
     volume: int = 0
+    bid_size: int = 0
+    ask_size: int = 0
 
     @property
     def mid(self) -> float:
@@ -227,7 +229,13 @@ class RiskLimits:
     drawdown_breaker_pct: float = 0.08
     max_spread_pct_of_mid: float = 0.15
     max_quote_age_s: float = 90.0
+    # Alpaca's contracts endpoint returns open_interest as null on this plan, so
+    # depth is screened on the signals that ARE populated: traded volume and the
+    # size actually quoted on each side. Any one of the three clearing its floor
+    # is enough; all three failing means nobody is really making a market here.
     min_open_interest: int = 100
+    min_daily_volume: int = 25
+    min_quote_size: int = 10
     min_credit_to_width: float = 0.15
     open_blackout_min: int = 10
     close_blackout_min: int = 10
@@ -379,10 +387,16 @@ def evaluate(
             f"bid={quote.bid:.2f} spread={quote.spread_pct_of_mid:.1%} "
             f"> {limits.max_spread_pct_of_mid:.0%} of mid",
         )
-        check(
-            f"open_interest[{leg.symbol}]",
+        depth_signals = (
             quote.open_interest >= limits.min_open_interest,
-            f"OI {quote.open_interest} < {limits.min_open_interest}",
+            quote.volume >= limits.min_daily_volume,
+            min(quote.bid_size, quote.ask_size) >= limits.min_quote_size,
+        )
+        check(
+            f"depth[{leg.symbol}]",
+            any(depth_signals),
+            f"no depth signal clears its floor: OI={quote.open_interest} "
+            f"vol={quote.volume} quoted={quote.bid_size}x{quote.ask_size}",
         )
         age = (book.now - quote.quote_ts).total_seconds()
         check(

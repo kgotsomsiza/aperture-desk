@@ -83,7 +83,9 @@ class CrushStrategy:
         if not events:
             return []
 
-        per_event = budget / len(events)
+        per_event = min(
+            budget / len(events), book.equity * self.config.max_trade_loss_pct
+        )
         proposals: list[Proposal] = []
         for event in events:
             if book.open_risk_by_underlying.get(event.symbol, 0.0) > 0:

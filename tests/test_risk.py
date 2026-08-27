@@ -272,12 +272,37 @@ def test_zero_bid_is_vetoed():
     assert "liquidity" in failed_gates(verdict)
 
 
-def test_thin_open_interest_is_vetoed():
+def test_no_depth_signal_is_vetoed():
+    # Alpaca reports open_interest as null, so depth is screened on volume and
+    # quoted size too. All three failing means nobody is making a market here.
     proposal = condor()
-    quotes = fresh_quotes(proposal, open_interest=3)
+    quotes = fresh_quotes(proposal, open_interest=3, volume=0, bid_size=0, ask_size=0)
     verdict = evaluate(proposal, quotes, healthy_book())
     assert not verdict.approved
-    assert "open_interest" in failed_gates(verdict)
+    assert "depth" in failed_gates(verdict)
+
+
+def test_volume_alone_satisfies_depth_when_open_interest_is_missing():
+    proposal = condor()
+    quotes = fresh_quotes(proposal, open_interest=-1, volume=500, bid_size=0, ask_size=0)
+    verdict = evaluate(proposal, quotes, healthy_book())
+    assert verdict.approved, verdict.audit_line()
+
+
+def test_quoted_size_alone_satisfies_depth():
+    proposal = condor()
+    quotes = fresh_quotes(proposal, open_interest=-1, volume=0, bid_size=120, ask_size=60)
+    verdict = evaluate(proposal, quotes, healthy_book())
+    assert verdict.approved, verdict.audit_line()
+
+
+def test_one_sided_quoted_size_does_not_count_as_depth():
+    # A deep bid with nothing offered is not a two-sided market.
+    proposal = condor()
+    quotes = fresh_quotes(proposal, open_interest=-1, volume=0, bid_size=500, ask_size=1)
+    verdict = evaluate(proposal, quotes, healthy_book())
+    assert not verdict.approved
+    assert "depth" in failed_gates(verdict)
 
 
 def test_unsimplified_ratios_are_vetoed():

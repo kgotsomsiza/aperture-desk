@@ -75,9 +75,10 @@ def test_snapshot_parses_both_alpaca_spellings(raw):
 
 def test_snapshot_without_open_interest_is_marked_unknown():
     parsed = parse_snapshot("SPY260918P00630000", {"latestQuote": {"bp": 1.0, "ap": 1.2}})
+    # Unknown stays -1 rather than collapsing to 0, so the depth gate can tell
+    # "not reported" apart from "genuinely zero" and fall back to volume/size.
     assert parsed.open_interest == -1
-    # An unknown OI must collapse to 0 for the gate, which then rejects it.
-    assert parsed.to_leg_quote().open_interest == 0
+    assert parsed.to_leg_quote().open_interest == -1
 
 
 def test_zero_bid_contract_is_not_priceable():

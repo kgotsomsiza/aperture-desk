@@ -35,6 +35,21 @@ def _pick(obj: dict[str, Any] | None, *names: str, default: Any = None) -> Any:
     return default
 
 
+def _bars_of(payload: dict[str, Any] | None, symbol: str) -> list[dict[str, Any]]:
+    """Normalise the two shapes Alpaca returns for bars.
+
+    ``data bars --symbol X`` (singular) returns ``{"bars": [...], "symbol": "X"}``
+    while the plural multi-symbol endpoints return ``{"bars": {"X": [...]}}``.
+    Assuming either one silently yields an empty series against the other.
+    """
+    bars = (payload or {}).get("bars")
+    if isinstance(bars, list):
+        return bars
+    if isinstance(bars, dict):
+        return bars.get(symbol) or []
+    return []
+
+
 def _parse_ts(value: Any) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
@@ -57,8 +72,10 @@ class Snapshot:
     gamma: float | None = None
     theta: float | None = None
     vega: float | None = None
-    open_interest: int = -1  # -1 means "not reported"; the risk gate treats that as a reject
+    open_interest: int = -1  # -1 means "not reported" -- Alpaca returns null here
     volume: int = 0
+    bid_size: int = 0
+    ask_size: int = 0
 
     @property
     def mid(self) -> float:
@@ -86,8 +103,10 @@ class Snapshot:
             bid=self.bid,
             ask=self.ask,
             quote_ts=self.quote_ts,
-            open_interest=max(self.open_interest, 0),
+            open_interest=self.open_interest,
             volume=self.volume,
+            bid_size=self.bid_size,
+            ask_size=self.ask_size,
         )
 
 
@@ -108,6 +127,8 @@ def parse_snapshot(symbol: str, raw: dict[str, Any]) -> Snapshot:
         vega=_pick(greeks, "vega"),
         open_interest=int(_pick(raw, "openInterest", "open_interest", default=-1) or -1),
         volume=int(_pick(daily, "v", "volume", default=0) or 0),
+        bid_size=int(_pick(quote, "bs", "bid_size", default=0) or 0),
+        ask_size=int(_pick(quote, "as", "ask_size", default=0) or 0),
     )
 
 
@@ -137,8 +158,10 @@ class MarketData:
         if bid > 0 and ask > 0:
             return (bid + ask) / 2
         # IEX can be one-sided outside of active trading; fall back to the last daily close.
-        bars = self.cli.stock_bars(symbol, start=(date.today() - timedelta(days=7)).isoformat())
-        series = ((bars or {}).get("bars") or {}).get(symbol) or []
+        series = _bars_of(
+            self.cli.stock_bars(symbol, start=(date.today() - timedelta(days=7)).isoformat()),
+            symbol,
+        )
         return float(series[-1]["c"]) if series else 0.0
 
     def open_interest(self, underlying: str) -> dict[str, int]:
@@ -218,10 +241,33 @@ class MarketData:
             snapshots[symbol] = snap
         return snapshots
 
+    def snapshots_for(self, symbols: Sequence[str], underlying: str) -> dict[str, Snapshot]:
+        """Fresh snapshots for specific contracts, with open interest merged in.
+
+        Used at the moment of decision: the chain that produced a proposal may be
+        seconds old by the time the Warden sees it, and the staleness gate is only
+        meaningful against quotes fetched now.
+        """
+        if not symbols:
+            return {}
+        payload = self.cli.option_snapshot(list(symbols), feed=self.feed)
+        oi_table = self.open_interest(underlying)
+
+        result: dict[str, Snapshot] = {}
+        for symbol, raw in ((payload or {}).get("snapshots") or {}).items():
+            snap = parse_snapshot(symbol, raw)
+            if snap.open_interest < 0 and symbol in oi_table:
+                snap = Snapshot(**{**snap.__dict__, "open_interest": oi_table[symbol]})
+            result[symbol] = snap
+        return result
+
+    def leg_quotes(self, symbols: Sequence[str], underlying: str) -> list[LegQuote]:
+        snaps = self.snapshots_for(symbols, underlying)
+        return [snaps[s].to_leg_quote() for s in symbols if s in snaps]
+
     def daily_bars(self, symbol: str, lookback_days: int = 800) -> list[dict[str, Any]]:
         start = (date.today() - timedelta(days=lookback_days)).isoformat()
-        payload = self.cli.stock_bars(symbol, start=start)
-        return ((payload or {}).get("bars") or {}).get(symbol) or []
+        return _bars_of(self.cli.stock_bars(symbol, start=start), symbol)
 
 
 # --------------------------------------------------------------------------- #
