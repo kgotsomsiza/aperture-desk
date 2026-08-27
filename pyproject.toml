@@ -12,6 +12,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "rich>=13.7",
     "scipy>=1.13",
+    "openai>=1.40",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]
