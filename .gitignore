@@ -26,6 +26,10 @@ htmlcov/
 *.log
 logs/
 
+# Runtime data
+state/
+KILL_SWITCH
+
 # OS metadata
 .DS_Store
 Thumbs.db
