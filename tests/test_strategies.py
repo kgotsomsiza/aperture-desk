@@ -487,3 +487,71 @@ def test_gap_sessions_accepts_bare_dates_too():
     from aperture.marketdata import gap_sessions
 
     assert gap_sessions([date(2026, 6, 2)]) == [date(2026, 6, 2)]
+
+
+# --------------------------------------------------------------------------- #
+# Provider swapping (Featherless is the hackathon's technology partner)
+# --------------------------------------------------------------------------- #
+
+
+def test_json_is_salvaged_from_a_fenced_reply():
+    """Open-weight models return ```json blocks even when told not to. Throwing
+    that away would discard answers that are good three characters in."""
+    from aperture.llm import extract_json
+
+    assert extract_json('```json\n{"direction": "bullish"}\n```') == {"direction": "bullish"}
+    assert extract_json('```\n{"a": 1}\n```') == {"a": 1}
+
+
+def test_json_is_salvaged_from_a_prose_wrapped_reply():
+    from aperture.llm import extract_json
+
+    got = extract_json('Sure! Here is the result:\n{"direction": "bearish"}\nHope that helps.')
+    assert got == {"direction": "bearish"}
+
+
+def test_plain_json_still_parses():
+    from aperture.llm import extract_json
+
+    assert extract_json('{"ok": true}') == {"ok": True}
+
+
+def test_unsalvageable_output_raises_for_the_caller_to_default():
+    import json as _json
+    from aperture.llm import extract_json
+
+    for bad in ("", "   ", "no json at all here"):
+        with pytest.raises(_json.JSONDecodeError):
+            extract_json(bad)
+
+
+def test_featherless_defaults_target_the_partner_endpoint(monkeypatch):
+    from aperture.llm import JSON_OBJECT, FeatherlessProvider
+
+    monkeypatch.setenv("FEATHERLESS_API_KEY", "test-key")
+    provider = FeatherlessProvider()
+    assert provider.base_url == "https://api.featherless.ai/v1"
+    assert provider.key_env == "FEATHERLESS_API_KEY"
+    assert provider.json_mode == JSON_OBJECT  # strict schema is undocumented there
+    assert provider.model_for("fast") != provider.model_for("reasoning")
+
+
+def test_build_provider_prefers_the_partner(monkeypatch):
+    from aperture.llm import FeatherlessProvider, OpenAIProvider, build_provider
+
+    monkeypatch.setenv("FEATHERLESS_API_KEY", "f-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "o-key")
+    monkeypatch.delenv("APERTURE_LLM_VENDOR", raising=False)
+    assert isinstance(build_provider(), FeatherlessProvider)
+
+    # Falls back rather than failing when the partner key is absent.
+    monkeypatch.delenv("FEATHERLESS_API_KEY", raising=False)
+    assert isinstance(build_provider(), OpenAIProvider)
+
+
+def test_no_keys_means_deterministic_only(monkeypatch):
+    from aperture.llm import NullProvider, build_provider
+
+    monkeypatch.delenv("FEATHERLESS_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert isinstance(build_provider(), NullProvider)
