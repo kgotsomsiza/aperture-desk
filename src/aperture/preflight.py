@@ -20,13 +20,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
 from .contracts import Right, build_occ, parse_occ
 from .identity import WrongAccountError, check as check_identity
+from .loop import build_closing_proposal, current_structure_price
+from .marketdata import MarketData
 from .risk import Leg, PositionIntent, Proposal, Side, analyse_payoff
+from .state import OpenTrade
 
 PASS, FAIL, WARN, INFO = "PASS", "FAIL", "WARN", "INFO"
 _ICON = {PASS: "[PASS]", FAIL: "[FAIL]", WARN: "[WARN]", INFO: "[INFO]"}
@@ -320,42 +324,130 @@ def check_order_path(
         report.add(INFO, "live order test", "skipped (pass --live-test to send one real order)")
         return
 
+    client_id = f"preflight-entry-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
     try:
-        order = cli.submit_mleg(proposal)
+        order = cli.submit_mleg(proposal, client_order_id=client_id)
         order_id = (order or {}).get("id", "?")
         report.add(PASS, "live mleg submit", f"accepted, order {order_id}")
     except AlpacaCliError as exc:
         report.add(FAIL, "live mleg submit", exc.stderr[:200])
         return
 
-    # Clean up after ourselves. A diagnostic that leaves a position open is a
-    # diagnostic that quietly changes the thing it was measuring.
+    if order_id == "?":
+        report.add(FAIL, "probe cleanup", "accepted order returned no id; inspect Alpaca manually")
+        return
+
     try:
-        if order_id != "?":
+        final = _wait_order(cli, order_id, timeout_s=3.0)
+        if str(final.get("status") or "").lower() not in {
+            "filled", "canceled", "expired", "rejected"
+        }:
             cli.cancel_order(order_id)
-            report.add(PASS, "probe order cancelled", f"order {order_id} withdrawn")
+            final = _wait_order(cli, order_id, timeout_s=5.0)
     except AlpacaCliError as exc:
-        # Already filled is the normal reason a cancel fails here.
-        report.add(WARN, "probe order cancel", f"{exc.stderr[:120]}")
-
-    filled = [
-        p for p in cli.positions()
-        if p.get("symbol") in {leg.symbol for leg in proposal.legs}
-    ]
-    for position in filled:
-        symbol = position["symbol"]
+        # A cancel often races a fill. Re-read once before deciding whether a
+        # structure exists that must be closed.
+        report.add(WARN, "probe order cancel", exc.stderr[:120])
         try:
-            cli.close_position(symbol)
-            report.add(PASS, "probe position closed", symbol)
-        except AlpacaCliError as exc:
-            report.add(FAIL, "probe position close", f"{symbol}: {exc.stderr[:120]} — CLOSE MANUALLY")
+            final = cli.order(order_id)
+        except AlpacaCliError as read_exc:
+            report.add(FAIL, "probe cleanup", f"cannot determine order state: {read_exc.stderr[:120]}")
+            return
 
-    if filled:
+    filled_qty = int(float(final.get("filled_qty") or 0))
+    if filled_qty <= 0:
+        status = str(final.get("status") or "unknown").lower()
+        report.add(
+            PASS if status in {"canceled", "expired", "rejected"} else FAIL,
+            "probe order cancelled",
+            f"terminal status {status}; no position opened",
+        )
+        return
+
+    _close_filled_probe(cli, report, feed, proposal, final, filled_qty)
+    if not report.failed:
         report.add(
             INFO,
             "sign convention",
             "check the fill: a negative limit_price must book as a CREDIT",
         )
+
+
+def _wait_order(
+    cli: AlpacaCLI, order_id: str, *, timeout_s: float, poll_s: float = 0.5
+) -> dict[str, Any]:
+    """Poll a parent order until terminal, returning the latest known payload."""
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    latest: dict[str, Any] = {}
+    while True:
+        latest = cli.order(order_id)
+        if str(latest.get("status") or "").lower() in {
+            "filled", "canceled", "expired", "rejected"
+        }:
+            return latest
+        if time.monotonic() >= deadline:
+            return latest
+        time.sleep(max(poll_s, 0.05))
+
+
+def _close_filled_probe(
+    cli: AlpacaCLI,
+    report: Report,
+    feed: str,
+    opening: Proposal,
+    order: dict[str, Any],
+    filled_qty: int,
+) -> None:
+    """Close the probe as one structure; never expose a naked intermediate leg."""
+    trade = OpenTrade(
+        client_order_id=str(order.get("client_order_id") or "preflight-entry"),
+        strategy_id="PREFLIGHT",
+        underlying=opening.underlying,
+        legs=[leg.symbol for leg in opening.legs],
+        qty=filled_qty,
+        net_price=float(order.get("filled_avg_price") or opening.net_price),
+        max_loss=analyse_payoff(opening).max_loss_or_inf,
+        opened_at=str(order.get("filled_at") or datetime.now(timezone.utc).isoformat()),
+        leg_sides={leg.symbol: leg.side.value for leg in opening.legs},
+        leg_ratios={leg.symbol: leg.ratio for leg in opening.legs},
+        status="open",
+    )
+    price = current_structure_price(MarketData(cli=cli, feed=feed), trade)
+    if price is None:
+        report.add(
+            FAIL,
+            "probe mleg close",
+            "filled spread could not be priced; close it manually as one multi-leg order",
+        )
+        return
+
+    closing = build_closing_proposal(trade, price)
+    close_client_id = f"preflight-close-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
+    try:
+        close_order = cli.submit_mleg(closing, client_order_id=close_client_id)
+        close_id = str((close_order or {}).get("id") or "")
+        if not close_id:
+            report.add(FAIL, "probe mleg close", "accepted close returned no order id")
+            return
+        final = _wait_order(cli, close_id, timeout_s=20.0)
+    except AlpacaCliError as exc:
+        report.add(
+            FAIL,
+            "probe mleg close",
+            f"{exc.stderr[:140]} — close manually as one multi-leg order",
+        )
+        return
+
+    closed_qty = int(float(final.get("filled_qty") or 0))
+    if closed_qty >= filled_qty:
+        report.add(PASS, "probe mleg close", f"all {filled_qty} spread(s) closed atomically")
+        return
+    report.add(
+        FAIL,
+        "probe mleg close",
+        f"close order {close_id} is {final.get('status', 'unknown')} with "
+        f"{closed_qty}/{filled_qty} filled; leave it working and do not start the desk",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
