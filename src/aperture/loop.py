@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
+from .allocator import Allocator, observe, summarise
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side
 from .earnings import EarningsCalendar
@@ -140,7 +141,7 @@ def run_cycle(
 ) -> dict:
     now = datetime.now(ET)
     summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0,
-               "breached": None, "flattening": False}
+               "breached": None, "flattening": False, "fired": []}
 
     clock = cli.clock()
     if not clock.get("is_open"):
@@ -185,9 +186,33 @@ def run_cycle(
     # 4. Exits before entries: free capital this cycle, and always allow an exit.
     summary["closed"] += manage_exits(cli, md, state, warden, dry_run=dry_run)
 
-    # 5-7. Propose, gate, submit.
+    # 5. Reallocate. Capital is the desk's only reward signal, so this runs
+    #    before anyone is asked for proposals -- a fired strategy should not get
+    #    the chance to propose, and a promoted one should feel it this cycle.
+    allocations = Allocator().allocate(
+        observe(state, warden.audit, PRIOR_WEIGHTS), book.equity
+    )
+    warden.budgets = {a.strategy_id: a.budget for a in allocations}
+    fired = {a.strategy_id for a in allocations if not a.is_active}
+    summary["fired"] = sorted(fired)
+
+    previous = state.allocations or {}
+    current = {a.strategy_id: a.weight for a in allocations}
+    if current != previous:
+        log.info("allocation changed:\n%s", summarise(allocations))
+        warden.audit.record(
+            "allocation",
+            weights=current,
+            budgets={a.strategy_id: a.budget for a in allocations},
+            reasons={a.strategy_id: a.reason for a in allocations},
+        )
+        state.allocations = current
+
+    # 6-8. Propose, gate, submit.
     book = build_book(cli, state, now)  # refresh after any exits
     for strategy in strategies:
+        if strategy.config.strategy_id in fired:
+            continue  # defunded: it keeps its open positions and its exits, not new capital
         budget = warden.budget_for(strategy.config.strategy_id, book)
         if budget <= 0:
             continue
@@ -479,13 +504,17 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if summary["breached"] else 0
 
 
+# The designed barbell, as shares of the total risk budget. These are the
+# allocator's prior, not a fixed schedule: from here the desk funds what works.
+PRIOR_WEIGHTS = {"CARRY": 0.64, "CRUSH": 0.18, "DRIFT": 0.18}
+
+
 def _budgets(equity: float) -> dict[str, float]:
-    """The barbell, expressed as maximum loss each strategy may have at risk."""
-    return {
-        "CARRY": equity * 0.18,
-        "CRUSH": equity * 0.05,
-        "DRIFT": equity * 0.05,
-    }
+    """Designed weights, before the allocator has observed anything."""
+    from .allocator import AllocationLimits
+
+    budget = equity * AllocationLimits().total_risk_budget_pct
+    return {k: budget * w for k, w in PRIOR_WEIGHTS.items()}
 
 
 if __name__ == "__main__":

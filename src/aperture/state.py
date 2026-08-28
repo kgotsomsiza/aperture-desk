@@ -87,6 +87,7 @@ class DeskState:
         )
 
     def save(self) -> None:
+        self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "high_water_mark": self.high_water_mark,

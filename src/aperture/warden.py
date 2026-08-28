@@ -41,6 +41,7 @@ class AuditLog:
     path: Path = Path("state/audit.jsonl")
 
     def __post_init__(self) -> None:
+        self.path = Path(self.path)  # accept a str without failing three frames later
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record(self, event: str, **fields) -> dict:

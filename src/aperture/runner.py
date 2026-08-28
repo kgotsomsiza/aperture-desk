@@ -112,7 +112,8 @@ class Runner:
                 "cycle: %d approved (%d submitted), %d vetoed, %d closed%s",
                 summary["approved"], summary["submitted"], summary["vetoed"],
                 summary["closed"],
-                (" | FLATTENING" if summary.get("flattening") else "")
+                (f" | FIRED: {','.join(summary['fired'])}" if summary.get("fired") else "")
+                + (" | FLATTENING" if summary.get("flattening") else "")
                 + (f" | BREACH: {summary['breached']}" if summary["breached"] else ""),
             )
             self.consecutive_failures = 0
