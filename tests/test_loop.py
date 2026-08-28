@@ -513,3 +513,48 @@ def test_closing_an_iron_condor_keeps_all_four_legs_together():
     assert sides["SPY260918C00660000"] is Side.BUY    # short call bought back
     assert sides["SPY260918P00625000"] is Side.SELL   # long put sold
     assert sides["SPY260918C00665000"] is Side.SELL   # long call sold
+
+
+# --------------------------------------------------------------------------- #
+# Official scoring window
+# --------------------------------------------------------------------------- #
+
+
+def test_scoring_window_matches_alpacas_published_timeline():
+    from aperture.loop import FLATTEN_FROM, SCORING_CLOSE, SCORING_OPEN, DEADLINE
+
+    # Mon 31 Aug 09:30 ET -> Fri 4 Sep 09:30 ET. Four sessions, and it ends at
+    # the opening bell, not at the submission deadline.
+    assert (SCORING_OPEN.month, SCORING_OPEN.day, SCORING_OPEN.hour, SCORING_OPEN.minute) == (8, 31, 9, 30)
+    assert (SCORING_CLOSE.month, SCORING_CLOSE.day, SCORING_CLOSE.hour, SCORING_CLOSE.minute) == (9, 4, 9, 30)
+    assert DEADLINE == SCORING_CLOSE
+    # Flatten during Thursday's session: the last full one before the snapshot,
+    # with hours of liquid market left to get out in.
+    assert (FLATTEN_FROM.month, FLATTEN_FROM.day) == (9, 3)
+    assert FLATTEN_FROM < SCORING_CLOSE
+    assert (SCORING_CLOSE - FLATTEN_FROM) > timedelta(hours=12)
+
+
+def test_risk_appetite_is_already_throttled_at_the_flatten_point():
+    """The flatten phase is what actually stops trading; the tournament clock is
+    a smooth ramp behind it, not the thing being relied on."""
+    from aperture.loop import FLATTEN_FROM, SCORING_CLOSE, SCORING_OPEN
+    from aperture.risk import tournament_risk_multiplier
+
+    early = tournament_risk_multiplier(SCORING_OPEN, SCORING_CLOSE, 100_000, 100_000)
+    late = tournament_risk_multiplier(FLATTEN_FROM, SCORING_CLOSE, 106_000, 100_000)
+    assert late <= 0.5
+    assert late < early
+
+    # In the final hours, being ahead means opening nothing at all.
+    final = tournament_risk_multiplier(
+        SCORING_CLOSE - timedelta(hours=2), SCORING_CLOSE, 106_000, 100_000
+    )
+    assert final == 0.0
+
+
+def test_tournament_clock_still_leans_in_early_in_the_window():
+    from aperture.loop import SCORING_CLOSE, SCORING_OPEN
+    from aperture.risk import tournament_risk_multiplier
+
+    assert tournament_risk_multiplier(SCORING_OPEN, SCORING_CLOSE, 100_000, 100_000) > 1.0

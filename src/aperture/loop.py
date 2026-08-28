@@ -43,9 +43,24 @@ from .warden import AuditLog, RiskWarden
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger("aperture")
 
-# The submission deadline: 4 Sep 2026, 17:00 SAST = 11:00 ET. The desk uses this
-# to scale its own risk appetite as the contest runs out.
-DEADLINE = datetime(2026, 9, 4, 11, 0, tzinfo=ET)
+# Official timeline, per Alpaca's published guidelines.
+#
+# The scored window is FOUR sessions, not six, and it ends at the *opening bell*
+# on 4 September rather than at the submission deadline. Judging takes a snapshot
+# of total account equity at that moment -- equity, not cash, so open positions
+# are marked to market and count.
+SCORING_OPEN = datetime(2026, 8, 31, 9, 30, tzinfo=ET)
+SCORING_CLOSE = datetime(2026, 9, 4, 9, 30, tzinfo=ET)
+DEADLINE = SCORING_CLOSE  # what the tournament clock scales against
+
+# Everything is closed during Thursday afternoon -- the last full session before
+# the snapshot, leaving two hours of liquid market to get out in.
+#
+# The snapshot lands one hour after the September jobs report and moments after
+# the opening bell, when option marks are widest and least reliable. A position
+# held through that is a bet on a macro print, priced at the worst quotes of the
+# week. Being flat converts the result into cash, which cannot be re-marked.
+FLATTEN_FROM = datetime(2026, 9, 3, 14, 0, tzinfo=ET)
 
 
 def build_strategies() -> list[Strategy]:
@@ -124,7 +139,8 @@ def run_cycle(
     require_expected: bool = False,
 ) -> dict:
     now = datetime.now(ET)
-    summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0, "breached": None}
+    summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0,
+               "breached": None, "flattening": False}
 
     clock = cli.clock()
     if not clock.get("is_open"):
@@ -145,7 +161,18 @@ def run_cycle(
     for vanished in state.reconcile(broker_symbols):
         warden.audit.record("reconcile", client_order_id=vanished)
 
-    # 2. Circuit breakers before anything else.
+    # 2. Endgame: past the flatten point, the only job is to be in cash.
+    if now >= FLATTEN_FROM:
+        summary["flattening"] = True
+        log.warning(
+            "endgame: past %s, closing everything and opening nothing",
+            FLATTEN_FROM.strftime("%d %b %H:%M ET"),
+        )
+        summary["closed"] += _flatten(cli, md, state, warden, dry_run=dry_run)
+        state.save()
+        return summary
+
+    # 3. Circuit breakers.
     breach = warden.breached(book)
     if breach:
         summary["breached"] = breach
@@ -155,10 +182,10 @@ def run_cycle(
         state.save()
         return summary
 
-    # 3. Exits before entries: free capital this cycle, and always allow an exit.
+    # 4. Exits before entries: free capital this cycle, and always allow an exit.
     summary["closed"] += manage_exits(cli, md, state, warden, dry_run=dry_run)
 
-    # 4-6. Propose, gate, submit.
+    # 5-7. Propose, gate, submit.
     book = build_book(cli, state, now)  # refresh after any exits
     for strategy in strategies:
         budget = warden.budget_for(strategy.config.strategy_id, book)
@@ -285,6 +312,24 @@ def manage_exits(
             log.info("[dry-run] would close %s: %s", trade.underlying, reason)
             continue
         if _close_trade(cli, md, state, warden, trade, reason):
+            closed += 1
+    return closed
+
+
+def _flatten(
+    cli: AlpacaCLI, md: MarketData, state: DeskState, warden: RiskWarden, *, dry_run: bool
+) -> int:
+    """Close everything, regardless of sleeve or P&L.
+
+    Distinct from de-risking: a breach keeps the ballast because that is what
+    recovers a drawdown, whereas the endgame wants no marks at all.
+    """
+    closed = 0
+    for trade in list(state.open_trades.values()):
+        if dry_run:
+            log.info("[dry-run] would flatten %s", trade.underlying)
+            continue
+        if _close_trade(cli, md, state, warden, trade, "endgame flatten"):
             closed += 1
     return closed
 
