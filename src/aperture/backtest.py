@@ -1,0 +1,471 @@
+"""Historical simulation of defined-risk option structures.
+
+This is what stands behind the claim that the desk *invented* a strategy rather
+than merely generated one. A candidate that has not been tested against real
+prices is a guess with a config file.
+
+**What this simulator does and does not know**, stated plainly because a backtest
+that overstates itself is worse than none:
+
+  * **Daily bars only.** Entries and exits happen at closes. Intraday paths are
+    invisible, so a structure that touched its stop and recovered inside a
+    session is recorded as never having touched it. This flatters stops.
+  * **No historical greeks.** Alpaca serves greeks on live snapshots, not on
+    history, so strikes are chosen by *moneyness* rather than delta. A 15-delta
+    short is approximated as a fixed percentage out of the money, which is close
+    at the tenors traded here and wrong in a volatility spike.
+  * **Mid-price fills, minus a fixed concession.** No queue, no partial fills.
+  * **Survivorship is not an issue** (contracts do not disappear) **but liquidity
+    is**: a strike that never traded still has bars, and the simulator cannot
+    tell that nobody would have filled you there.
+
+Every one of those biases points the same way — toward flattering results. The
+promotion gate in ``research.py`` is calibrated with that in mind.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import statistics
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any, Sequence
+
+from .alpaca_cli import AlpacaCLI, AlpacaCliError
+from .contracts import Right, parse_occ
+from .marketdata import _parse_ts
+
+log = logging.getLogger(__name__)
+
+CONTRACT_MULTIPLIER = 100
+
+
+@dataclass
+class HistoricalBar:
+    day: date
+    close: float
+
+
+@dataclass
+class OptionHistory:
+    """Daily closes for every contract we could load, indexed for fast lookup."""
+
+    underlying: str
+    spot: dict[date, float] = field(default_factory=dict)
+    bars: dict[str, dict[date, float]] = field(default_factory=dict)
+
+    def price(self, symbol: str, day: date) -> float | None:
+        return self.bars.get(symbol, {}).get(day)
+
+    def sessions(self) -> list[date]:
+        return sorted(self.spot)
+
+    def contracts_for(self, expiry: date, right: Right) -> list[str]:
+        out = []
+        for symbol in self.bars:
+            try:
+                parsed = parse_occ(symbol)
+            except ValueError:
+                continue
+            if parsed.expiry == expiry and parsed.right is right:
+                out.append(symbol)
+        return sorted(out, key=lambda s: parse_occ(s).strike)
+
+
+@dataclass
+class SimulatedTrade:
+    entry: date
+    exit: date
+    legs: tuple[str, ...]
+    qty: int
+    entry_price: float  # Alpaca convention: + debit, - credit
+    exit_price: float
+    max_loss: float
+    reason: str
+
+    @property
+    def pnl(self) -> float:
+        # Opened at entry_price, closed at exit_price, both quoted the same way.
+        return (self.entry_price - self.exit_price) * self.qty * CONTRACT_MULTIPLIER * -1
+
+
+@dataclass
+class BacktestResult:
+    strategy_id: str
+    trades: list[SimulatedTrade] = field(default_factory=list)
+
+    @property
+    def n(self) -> int:
+        return len(self.trades)
+
+    @property
+    def wins(self) -> int:
+        return sum(1 for t in self.trades if t.pnl > 0)
+
+    @property
+    def total_pnl(self) -> float:
+        return sum(t.pnl for t in self.trades)
+
+    @property
+    def total_risk(self) -> float:
+        return sum(t.max_loss for t in self.trades)
+
+    @property
+    def edge(self) -> float:
+        """Mean P&L per dollar of risk, the same unit the allocator scores on."""
+        return self.total_pnl / self.total_risk if self.total_risk > 0 else 0.0
+
+    @property
+    def returns(self) -> list[float]:
+        return [t.pnl / t.max_loss for t in self.trades if t.max_loss > 0]
+
+    @property
+    def t_stat(self) -> float:
+        """How much of the edge survives its own noise.
+
+        With a handful of trades this is the only number worth trusting, and even
+        then only as a filter against obvious luck.
+        """
+        series = self.returns
+        if len(series) < 3:
+            return 0.0
+        spread = statistics.stdev(series)
+        if spread <= 0:
+            return 0.0
+        return statistics.mean(series) / (spread / math.sqrt(len(series)))
+
+    @property
+    def max_drawdown(self) -> float:
+        peak = running = 0.0
+        worst = 0.0
+        for trade in self.trades:
+            running += trade.pnl
+            peak = max(peak, running)
+            worst = min(worst, running - peak)
+        return abs(worst)
+
+    def summary(self) -> str:
+        if not self.n:
+            return f"{self.strategy_id}: no trades"
+        return (
+            f"{self.strategy_id}: {self.n} trades, {self.wins}/{self.n} wins, "
+            f"edge {self.edge:+.1%} of risk, t={self.t_stat:.2f}, "
+            f"maxDD ${self.max_drawdown:,.0f}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Loading history
+# --------------------------------------------------------------------------- #
+
+
+def _nearest_strikes(symbols: Sequence[str], anchor: float, count: int) -> list[str]:
+    """The ``count`` contracts closest to ``anchor``, not the first ``count``.
+
+    Every Alpaca listing endpoint returns an ordered page, and every naive head
+    slice of one silently yields a biased subset: contracts sorted by strike give
+    the lowest strikes, sorted by symbol give only calls, sorted by expiry give a
+    single date. All three of those bugs were written here before this helper
+    existed. Select around the value you care about instead of trusting the order.
+    """
+    parsed = []
+    for symbol in symbols:
+        try:
+            parsed.append((abs(parse_occ(symbol).strike - anchor), symbol))
+        except ValueError:
+            continue
+    parsed.sort()
+    return [symbol for _, symbol in parsed[:count]]
+
+
+def _target_expiries(start: date, end: date, count: int) -> list[date]:
+    """Fridays spread evenly across the window.
+
+    Sampling deliberately, rather than taking whatever the contract listing
+    returns first. The listing comes back in expiry order, so a naive cap yields
+    hundreds of contracts that all expire on the same early date -- every one of
+    them with a single bar, and nothing for a walk-forward to walk through.
+    """
+    fridays = []
+    day = start
+    while day <= end:
+        if day.weekday() == 4:
+            fridays.append(day)
+        day += timedelta(days=1)
+    if not fridays:
+        return []
+    step = max(len(fridays) // max(count, 1), 1)
+    return fridays[::step][:count]
+
+
+def load_history(
+    cli: AlpacaCLI,
+    underlying: str,
+    *,
+    start: date,
+    end: date,
+    moneyness: float = 0.08,
+    expiries: int = 10,
+    strikes_per_expiry: int = 200,
+) -> OptionHistory:
+    """Fetch underlying and option daily bars for a window.
+
+    Contracts are pulled one expiry at a time so that each has dense coverage
+    across its whole life, which is what a walk-forward simulation needs. Only
+    resolved windows work: contract discovery uses the expired listing.
+
+    ``strikes_per_expiry`` has to span the whole structure, not just the money.
+    SPY strikes are a dollar apart near the money, so a hundred per side is about
+    fifteen percent of spot -- comfortably wider than the four-percent shorts and
+    their wings. Too few and the short strikes simply are not in the loaded set,
+    which looks exactly like a strategy that never finds a trade.
+    """
+    history = OptionHistory(underlying=underlying)
+
+    for bar in _bars(cli.stock_bars(underlying, start=start.isoformat()), underlying):
+        day = _parse_ts(bar.get("t")).date()
+        if start <= day <= end and bar.get("c"):
+            history.spot[day] = float(bar["c"])
+
+    if not history.spot:
+        log.warning("no underlying history for %s", underlying)
+        return history
+
+    sessions = history.sessions()
+    for expiry in _target_expiries(start, end, expiries):
+        # Anchor the strike band to where the underlying actually was a few weeks
+        # before this expiry, not to the window's average.
+        anchor_day = max((d for d in sessions if d <= expiry - timedelta(days=21)), default=None)
+        if anchor_day is None:
+            continue
+        anchor = history.spot[anchor_day]
+
+        # Calls and puts are requested separately. The listing is ordered by
+        # symbol, so "C" sorts ahead of "P" and any head-slice of a combined
+        # response returns nothing but calls -- which silently yields a chain
+        # with no put side and a condor that can never be built.
+        symbols: list[str] = []
+        for option_type in ("call", "put"):
+            try:
+                payload = cli.run(
+                    "option", "contracts",
+                    "--underlying-symbols", underlying,
+                    "--expiration-date", expiry.isoformat(),
+                    "--strike-price-gte", str(round(anchor * (1 - moneyness), 2)),
+                    "--strike-price-lte", str(round(anchor * (1 + moneyness), 2)),
+                    "--type", option_type,
+                    "--status", "inactive",
+                    "--limit", "10000",
+                )
+            except AlpacaCliError as exc:
+                log.warning("%s contracts for %s failed: %s", option_type, expiry, exc.stderr[:100])
+                continue
+            found = [
+                c["symbol"]
+                for c in (payload or {}).get("option_contracts") or []
+                if c.get("symbol")
+            ]
+            symbols.extend(_nearest_strikes(found, anchor, strikes_per_expiry // 2))
+
+        if not symbols:
+            continue
+
+        bars_from = (expiry - timedelta(days=60)).isoformat()
+        for chunk in (symbols[i:i + 100] for i in range(0, len(symbols), 100)):
+            try:
+                bars = cli.option_bars(chunk, start=bars_from)
+            except AlpacaCliError as exc:
+                log.warning("option bars failed: %s", exc.stderr[:100])
+                continue
+            for symbol, series in ((bars or {}).get("bars") or {}).items():
+                table = history.bars.setdefault(symbol, {})
+                for bar in series or []:
+                    if bar.get("c"):
+                        table[_parse_ts(bar.get("t")).date()] = float(bar["c"])
+
+    dense = sum(1 for t in history.bars.values() if len(t) >= 10)
+    log.info(
+        "%s: %d sessions, %d contracts (%d with 10+ bars), %d expiries",
+        underlying, len(history.spot), len(history.bars), dense,
+        len({parse_occ(s).expiry for s in history.bars}),
+    )
+    return history
+
+
+def _bars(payload: dict[str, Any] | None, symbol: str) -> list[dict[str, Any]]:
+    bars = (payload or {}).get("bars")
+    if isinstance(bars, list):
+        return bars
+    if isinstance(bars, dict):
+        return bars.get(symbol) or []
+    return []
+
+
+# --------------------------------------------------------------------------- #
+# Simulation
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CondorSpec:
+    """A short iron condor described by moneyness rather than delta.
+
+    Delta is unavailable historically, so the short strikes sit a fixed
+    percentage out of the money. At 7-21 days that tracks a 10-20 delta short
+    reasonably well, and diverges when volatility moves sharply.
+    """
+
+    short_pct: float = 0.04     # short strikes this far OTM
+    width_pct: float = 0.01     # wing width, as a fraction of spot
+    dte_target: int = 14
+    take_profit: float = 0.50
+    stop_multiple: float = 2.0
+    slippage: float = 0.05
+
+
+def simulate_condors(
+    history: OptionHistory, spec: CondorSpec, *, strategy_id: str = "CANDIDATE"
+) -> BacktestResult:
+    """Walk forward, opening one condor per week and managing it to a rule."""
+    result = BacktestResult(strategy_id=strategy_id)
+    sessions = history.sessions()
+    if len(sessions) < 10:
+        return result
+
+    expiries = sorted({parse_occ(s).expiry for s in history.bars})
+    open_until: date | None = None
+
+    for today in sessions:
+        if open_until and today <= open_until:
+            continue
+
+        spot = history.spot[today]
+        expiry = _nearest_expiry(expiries, today, spec.dte_target)
+        if expiry is None:
+            continue
+
+        legs = _pick_condor(history, expiry, spot, spec)
+        if legs is None:
+            continue
+
+        entry = _price(history, legs, today)
+        if entry is None or entry >= 0:
+            continue  # a condor that is not a credit is not this structure
+
+        max_loss = _max_loss(legs, entry)
+        if max_loss <= 0:
+            continue
+
+        exit_day, exit_price, reason = _manage(history, legs, today, expiry, entry, spec)
+        if exit_day is None:
+            continue
+
+        result.trades.append(
+            SimulatedTrade(
+                entry=today, exit=exit_day, legs=legs, qty=1,
+                entry_price=entry, exit_price=exit_price,
+                max_loss=max_loss, reason=reason,
+            )
+        )
+        open_until = exit_day
+
+    return result
+
+
+def _nearest_expiry(expiries: Sequence[date], today: date, target: int) -> date | None:
+    candidates = [e for e in expiries if 5 <= (e - today).days <= target + 14]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda e: abs((e - today).days - target))
+
+
+def _pick_condor(
+    history: OptionHistory, expiry: date, spot: float, spec: CondorSpec
+) -> tuple[str, ...] | None:
+    puts = history.contracts_for(expiry, Right.PUT)
+    calls = history.contracts_for(expiry, Right.CALL)
+    if len(puts) < 2 or len(calls) < 2:
+        return None
+
+    width = max(spot * spec.width_pct, 1.0)
+    short_put = _nearest(puts, spot * (1 - spec.short_pct))
+    long_put = _nearest(puts, spot * (1 - spec.short_pct) - width)
+    short_call = _nearest(calls, spot * (1 + spec.short_pct))
+    long_call = _nearest(calls, spot * (1 + spec.short_pct) + width)
+    if None in (short_put, long_put, short_call, long_call):
+        return None
+
+    strikes = [parse_occ(s).strike for s in (long_put, short_put, short_call, long_call)]
+    if not strikes[0] < strikes[1] < strikes[2] < strikes[3]:
+        return None
+    return (long_put, short_put, short_call, long_call)
+
+
+def _nearest(symbols: Sequence[str], target: float) -> str | None:
+    return min(symbols, key=lambda s: abs(parse_occ(s).strike - target)) if symbols else None
+
+
+def _price(history: OptionHistory, legs: Sequence[str], day: date) -> float | None:
+    """Structure price on a day: long legs add, short legs subtract."""
+    long_put, short_put, short_call, long_call = legs
+    parts = {}
+    for symbol in legs:
+        value = history.price(symbol, day)
+        if value is None:
+            return None
+        parts[symbol] = value
+    return (
+        parts[long_put] - parts[short_put] - parts[short_call] + parts[long_call]
+    )
+
+
+def _max_loss(legs: Sequence[str], entry_price: float) -> float:
+    long_put, short_put, short_call, long_call = (parse_occ(s).strike for s in legs)
+    width = max(short_put - long_put, long_call - short_call)
+    credit = -entry_price
+    return max((width - credit) * CONTRACT_MULTIPLIER, 0.0)
+
+
+def _manage(
+    history: OptionHistory,
+    legs: Sequence[str],
+    entry_day: date,
+    expiry: date,
+    entry_price: float,
+    spec: CondorSpec,
+) -> tuple[date | None, float, str]:
+    """Hold until the profit target, the stop, or expiry -- whichever comes first."""
+    credit = abs(entry_price)
+    for day in history.sessions():
+        if day <= entry_day:
+            continue
+        if day > expiry:
+            break
+        current = _price(history, legs, day)
+        if current is None:
+            continue
+        cost_to_close = abs(current)
+
+        if cost_to_close <= credit * (1 - spec.take_profit):
+            return day, current + spec.slippage, "take profit"
+        if cost_to_close >= credit * spec.stop_multiple:
+            return day, current + spec.slippage, "stop"
+
+    # Fell through to expiry: settle at intrinsic against the final spot.
+    final = max((d for d in history.spot if d <= expiry), default=None)
+    if final is None:
+        return None, 0.0, "no data"
+    return expiry, _intrinsic(legs, history.spot[final]), "expiry"
+
+
+def _intrinsic(legs: Sequence[str], spot: float) -> float:
+    long_put, short_put, short_call, long_call = legs
+    value = 0.0
+    for symbol, sign in ((long_put, 1), (short_put, -1), (short_call, -1), (long_call, 1)):
+        parsed = parse_occ(symbol)
+        if parsed.right is Right.CALL:
+            value += sign * max(spot - parsed.strike, 0.0)
+        else:
+            value += sign * max(parsed.strike - spot, 0.0)
+    return value
