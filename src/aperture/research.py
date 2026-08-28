@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Sequence
 
 from .alpaca_cli import AlpacaCLI
@@ -51,6 +53,7 @@ class Candidate:
     spec: CondorSpec
     parent: str
     mutation: str  # what was changed, in words
+    hypothesis: str = ""  # why the model prioritised it; never a promotion input
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,12 @@ class PromotionGate:
                     f"own profit; too rough to fund"
                 )
 
-        if incumbent is not None and incumbent.n >= self.min_trades:
+        if incumbent is not None and incumbent.n < self.min_trades:
+            return False, (
+                f"incumbent has only {incumbent.n} trades; cannot prove an improvement"
+            )
+
+        if incumbent is not None:
             lift = candidate.edge - incumbent.edge
             if lift < self.min_improvement:
                 return False, (
@@ -139,34 +147,131 @@ def mutate(spec: CondorSpec, count: int, rng: random.Random) -> list[Candidate]:
     tests better teaches nothing about which change mattered, and cannot be
     trusted to keep working when one of them stops.
     """
-    seen: set[tuple] = set()
+    pool = mutation_pool(spec)
+    rng.shuffle(pool)
+    return pool[:count]
+
+
+def mutation_pool(spec: CondorSpec) -> list[Candidate]:
+    """The finite, predeclared hypothesis family the model may choose from.
+
+    Featherless prioritises economically plausible experiments; it does not get
+    to invent arbitrary parameters after seeing results.  Keeping the family
+    finite makes the multiple-testing correction know what was searched.
+    """
     out: list[Candidate] = []
-
-    for index in range(count * 4):
-        if len(out) >= count:
-            break
-        field_name, deltas, description = rng.choice(MUTATIONS)
-        delta = rng.choice(deltas)
+    for field_name, deltas, description in MUTATIONS:
         current = getattr(spec, field_name)
-        value = round(current + delta, 4) if isinstance(current, float) else current + delta
-
-        if not _sane(field_name, value):
-            continue
-        key = (field_name, value)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        direction = "wider" if delta > 0 else "tighter"
-        out.append(
-            Candidate(
-                candidate_id=f"S{len(out) + 5}-{field_name.upper()[:5]}",
-                spec=replace(spec, **{field_name: value}),
-                parent="CARRY",
-                mutation=f"{description} {direction}: {field_name} {current} -> {value}",
+        for delta in deltas:
+            value = round(current + delta, 4) if isinstance(current, float) else current + delta
+            if not _sane(field_name, value):
+                continue
+            direction = "wider" if delta > 0 else "tighter"
+            encoded = str(value).replace("-", "M").replace(".", "P")
+            out.append(
+                Candidate(
+                    candidate_id=f"CAND-{field_name.upper()[:5]}-{encoded}",
+                    spec=replace(spec, **{field_name: value}),
+                    parent="CARRY",
+                    mutation=(
+                        f"{description} {direction}: {field_name} {current} -> {value}"
+                    ),
+                )
             )
-        )
     return out
+
+
+def hypothesize(
+    provider: LLMProvider,
+    spec: CondorSpec,
+    count: int,
+    rng: random.Random,
+) -> list[Candidate]:
+    """Let the reasoning layer prioritise safe one-knob experiments.
+
+    This is the model's substantive research job.  It sees the candidate family
+    and market mechanics, but no backtest outcomes.  Python validates its IDs,
+    fills any missing choices deterministically, and the statistical gate alone
+    decides whether a hypothesis is hired.
+    """
+    fallback = mutate(spec, count, rng)
+    if isinstance(provider, NullProvider) or not fallback:
+        return fallback
+
+    pool = mutation_pool(spec)
+    by_id = {candidate.candidate_id: candidate for candidate in pool}
+    choices = "\n".join(
+        f"- {candidate.candidate_id}: {candidate.mutation}" for candidate in pool
+    )
+    default = {
+        "selections": [
+            {
+                "candidate_id": candidate.candidate_id,
+                "thesis": "deterministic fallback selection",
+            }
+            for candidate in fallback
+        ]
+    }
+    answer = ask_json(
+        provider,
+        system=(
+            "You are the hypothesis-selection layer for a defined-risk options desk. "
+            "Prioritise experiments for economic plausibility only. You have no "
+            "performance data and must choose only IDs from the supplied list. "
+            "The statistical gate, not you, decides promotion."
+        ),
+        user=(
+            f"Choose exactly {min(count, len(pool))} distinct one-parameter iron-condor "
+            f"experiments. Give one short falsifiable thesis for each.\n\n{choices}"
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "selections": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "candidate_id": {"type": "string"},
+                            "thesis": {"type": "string"},
+                        },
+                        "required": ["candidate_id", "thesis"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["selections"],
+            "additionalProperties": False,
+        },
+        tier="fast",
+        default=default,
+    )
+
+    selected: list[Candidate] = []
+    seen: set[str] = set()
+    rows = answer.get("selections", []) if isinstance(answer, dict) else []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        candidate_id = str(row.get("candidate_id") or "")
+        candidate = by_id.get(candidate_id)
+        if candidate is None or candidate_id in seen:
+            continue
+        thesis = " ".join(str(row.get("thesis") or "").split())[:240]
+        selected.append(replace(candidate, hypothesis=thesis))
+        seen.add(candidate_id)
+        if len(selected) >= count:
+            break
+
+    # Invalid, duplicate, or incomplete model output cannot reduce the nightly
+    # experiment count.  Seeded fallback choices make replay deterministic.
+    for candidate in fallback:
+        if len(selected) >= count:
+            break
+        if candidate.candidate_id not in seen:
+            selected.append(replace(candidate, hypothesis="deterministic fallback selection"))
+            seen.add(candidate.candidate_id)
+    return selected
 
 
 def _sane(field_name: str, value) -> bool:
@@ -194,7 +299,10 @@ def narrate(provider: LLMProvider, candidate: Candidate, result: BacktestResult)
             "change to an iron condor's parameters might improve results. No "
             "hype, no disclaimers."
         ),
-        user=f"Change: {candidate.mutation}. Backtest: {result.summary()}",
+        user=(
+            f"Change: {candidate.mutation}. Initial hypothesis: "
+            f"{candidate.hypothesis or 'not supplied'}. Backtest: {result.summary()}"
+        ),
         schema={
             "type": "object",
             "properties": {"rationale": {"type": "string"}},
@@ -218,11 +326,23 @@ class LabReport:
     promoted: list[tuple[Candidate, BacktestResult, str]] = field(default_factory=list)
     rejected: list[tuple[Candidate, BacktestResult, str]] = field(default_factory=list)
     incumbent: BacktestResult | None = None
+    training_window: tuple[str, str] | None = None
+    validation_window: tuple[str, str] | None = None
+    multiple_testing_trials: int = 0
 
     def summary(self) -> str:
         lines = [f"research lab: {self.tested} candidates tested, {len(self.promoted)} promoted"]
         if self.incumbent:
             lines.append(f"  incumbent  {self.incumbent.summary()}")
+        if self.training_window and self.validation_window:
+            lines.append(
+                f"  selected on {self.training_window[0]}..{self.training_window[1]}, "
+                f"validated on {self.validation_window[0]}..{self.validation_window[1]}"
+            )
+        if self.multiple_testing_trials:
+            lines.append(
+                f"  promotion bar accounts for {self.multiple_testing_trials} cumulative trials"
+            )
         for candidate, result, reason in self.promoted:
             lines.append(f"  HIRED      {candidate.candidate_id}: {reason}")
             lines.append(f"             {candidate.mutation}")
@@ -244,8 +364,16 @@ def run_lab(
     provider: LLMProvider | None = None,
     seed: int | None = None,
     asof: date | None = None,
+    holdout_fraction: float = 0.25,
+    embargo_days: int = 35,
+    prior_trials: int = 0,
 ) -> LabReport:
-    """Test a field of mutations against real history and promote what survives."""
+    """Select mutations on history and promote only those that survive a holdout.
+
+    The chronological holdout is separated from selection by an embargo longer
+    than the traded tenor.  That keeps an option structure opened in the training
+    window from leaking its later marks into validation.
+    """
     baseline = baseline or CondorSpec()
     gate = gate or PromotionGate()
     provider = provider or NullProvider()
@@ -265,20 +393,97 @@ def run_lab(
         log.warning("no option history for %s; the lab cannot run tonight", underlying)
         return report
 
-    report.incumbent = simulate_condors(history, baseline, strategy_id="CARRY(incumbent)")
+    sessions = history.sessions()
+    if len(sessions) < 20:
+        log.warning("history has only %d sessions; not enough for a holdout", len(sessions))
+        return report
+    split_index = min(max(int(len(sessions) * (1 - holdout_fraction)), 1), len(sessions) - 1)
+    validation_start = sessions[split_index]
+    training_end = validation_start - timedelta(days=embargo_days)
+    training = history.between(end=training_end)
+    validation = history.between(start=validation_start)
+    if len(training.sessions()) < 10 or len(validation.sessions()) < 10:
+        log.warning("history cannot support a chronological holdout")
+        return report
+
+    report.training_window = (str(training.sessions()[0]), str(training.sessions()[-1]))
+    report.validation_window = (str(validation.sessions()[0]), str(validation.sessions()[-1]))
+    report.incumbent = simulate_condors(
+        training, baseline, strategy_id="CARRY(incumbent/train)"
+    )
+    validation_incumbent = simulate_condors(
+        validation, baseline, strategy_id="CARRY(incumbent/holdout)"
+    )
     log.info("incumbent: %s", report.incumbent.summary())
 
-    field_ = mutate(baseline, candidates, rng)
+    field_ = hypothesize(provider, baseline, candidates, rng)
     report.tested = len(field_)
+    report.multiple_testing_trials = max(prior_trials, 0) + report.tested
 
     for candidate in field_:
-        result = simulate_condors(history, candidate.spec, strategy_id=candidate.candidate_id)
-        passed, reason = gate.evaluate(result, report.incumbent, report.tested)
-        if passed:
-            reason = f"{reason}. {narrate(provider, candidate, result)}"
-            report.promoted.append((candidate, result, reason))
-        else:
-            report.rejected.append((candidate, result, reason))
+        selected = simulate_condors(
+            training, candidate.spec, strategy_id=f"{candidate.candidate_id}/train"
+        )
+        passed, reason = gate.evaluate(
+            selected, report.incumbent, report.multiple_testing_trials
+        )
+        if not passed:
+            report.rejected.append((candidate, selected, f"selection: {reason}"))
+            continue
+
+        held_out = simulate_condors(
+            validation, candidate.spec, strategy_id=f"{candidate.candidate_id}/holdout"
+        )
+        passed, holdout_reason = gate.evaluate(
+            held_out, validation_incumbent, report.multiple_testing_trials
+        )
+        if not passed:
+            report.rejected.append((candidate, held_out, f"holdout: {holdout_reason}"))
+            continue
+
+        reason = (
+            f"selection survived ({reason}); holdout survived ({holdout_reason}). "
+            f"{narrate(provider, candidate, held_out)}"
+        )
+        report.promoted.append((candidate, held_out, reason))
 
     log.info("%s", report.summary())
     return report
+
+
+def promotion_records(
+    report: LabReport, *, underlying: str, hired_at: datetime | None = None
+) -> list[dict]:
+    """Stable, serialisable roster rows for candidates the gate actually hired."""
+    hired_at = hired_at or datetime.now(timezone.utc)
+    rows = []
+    for candidate, result, reason in report.promoted:
+        spec = asdict(candidate.spec)
+        identity = json.dumps(
+            {"underlying": underlying, "spec": spec}, sort_keys=True, separators=(",", ":")
+        )
+        strategy_id = f"LAB-{hashlib.sha256(identity.encode()).hexdigest()[:8].upper()}"
+        rows.append({
+            "strategy_id": strategy_id,
+            "candidate_id": candidate.candidate_id,
+            "parent": candidate.parent,
+            "underlying": underlying,
+            "mutation": candidate.mutation,
+            "hypothesis": candidate.hypothesis,
+            "spec": spec,
+            "backtest": {
+                "trades": result.n,
+                "wins": result.wins,
+                "edge": round(result.edge, 6),
+                "t_stat": round(result.t_stat, 4),
+                "total_pnl": round(result.total_pnl, 2),
+                "max_drawdown": round(result.max_drawdown, 2),
+            },
+            "reason": reason,
+            "status": "probation",
+            "hired_at": hired_at.isoformat(),
+            "training_window": report.training_window,
+            "validation_window": report.validation_window,
+            "multiple_testing_trials": report.multiple_testing_trials,
+        })
+    return rows

@@ -8,6 +8,7 @@ gate refusing.
 from __future__ import annotations
 
 import random
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -20,7 +21,14 @@ from aperture.backtest import (
     simulate_condors,
 )
 from aperture.contracts import Right, build_occ
-from aperture.research import Candidate, PromotionGate, mutate, run_lab
+from aperture.research import (
+    Candidate,
+    PromotionGate,
+    hypothesize,
+    mutate,
+    mutation_pool,
+    run_lab,
+)
 
 
 def trade(pnl: float, risk: float = 1_000.0) -> SimulatedTrade:
@@ -147,6 +155,14 @@ def test_a_real_improvement_on_the_incumbent_is_promoted():
     assert "vs incumbent" in reason
 
 
+def test_candidate_cannot_be_promoted_without_enough_incumbent_evidence():
+    candidate = result_with(GOOD)
+    thin_incumbent = result_with([20.0] * 4)
+    passed, reason = PromotionGate().evaluate(candidate, thin_incumbent, 1)
+    assert not passed
+    assert "incumbent has only" in reason
+
+
 def test_a_profitable_but_rough_candidate_is_refused():
     """Significant and profitable, but it gives back 74% of its own profit in one
     run. Clears the t-stat bar and is refused anyway."""
@@ -195,6 +211,33 @@ def test_mutation_is_deterministic_for_a_seed():
     assert a == b
 
 
+def test_featherless_prioritises_hypotheses_but_cannot_invent_parameters():
+    pool = mutation_pool(CondorSpec())
+    chosen = pool[-1]
+
+    class Provider:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps({
+                "selections": [
+                    {"candidate_id": "NOT-IN-THE-FAMILY", "thesis": "invalid"},
+                    {"candidate_id": chosen.candidate_id, "thesis": "tests tail-risk tolerance"},
+                ]
+            })
+
+    provider = Provider()
+    selected = hypothesize(provider, CondorSpec(), 3, random.Random(9))
+
+    assert len(selected) == 3
+    assert selected[0].candidate_id == chosen.candidate_id
+    assert selected[0].hypothesis == "tests tail-risk tolerance"
+    assert all(candidate.candidate_id in {row.candidate_id for row in pool} for candidate in selected)
+    assert provider.calls[0]["tier"] == "fast"
+
+
 # --------------------------------------------------------------------------- #
 # Simulation against a synthetic history
 # --------------------------------------------------------------------------- #
@@ -231,7 +274,7 @@ def build_history(closes: list[float], expiry: date, strikes: list[float]) -> Op
 
 def test_simulator_produces_trades_on_a_workable_history():
     expiry = date(2026, 2, 20)
-    closes = [100.0] * 40
+    closes = [100.0] * 50  # includes the 20 February expiry
     strikes = [92.0, 94.0, 96.0, 100.0, 104.0, 106.0, 108.0]
     history = build_history(closes, expiry, strikes)
 
@@ -244,7 +287,7 @@ def test_simulator_produces_trades_on_a_workable_history():
 def test_simulator_charges_slippage_adversely_on_both_sides(monkeypatch):
     expiry = date(2026, 2, 20)
     history = build_history(
-        [100.0] * 40,
+        [100.0] * 50,  # includes the 20 February expiry
         expiry,
         [92.0, 94.0, 96.0, 100.0, 104.0, 106.0, 108.0],
     )
@@ -278,6 +321,67 @@ def test_simulator_charges_slippage_adversely_on_both_sides(monkeypatch):
     assert exit_price == pytest.approx(-0.45)
 
 
+def test_simulator_counts_each_expiry_only_once_after_an_early_exit(monkeypatch):
+    import aperture.backtest as backtest
+
+    start = date(2026, 1, 1)
+    expiries = (date(2026, 1, 16), date(2026, 2, 20))
+    history = OptionHistory(
+        underlying="TEST",
+        spot={start + timedelta(days=i): 100.0 for i in range(70)},
+    )
+    for expiry in expiries:
+        for strike, right in (
+            (90, Right.PUT), (95, Right.PUT), (105, Right.CALL), (110, Right.CALL)
+        ):
+            history.bars[build_occ("TEST", expiry, right, strike)] = {start: 1.0}
+
+    def picked(_history, expiry, _spot, _spec):
+        return (
+            build_occ("TEST", expiry, Right.PUT, 90),
+            build_occ("TEST", expiry, Right.PUT, 95),
+            build_occ("TEST", expiry, Right.CALL, 105),
+            build_occ("TEST", expiry, Right.CALL, 110),
+        )
+
+    monkeypatch.setattr(backtest, "_pick_condor", picked)
+    monkeypatch.setattr(backtest, "_price", lambda *args: -1.0)
+    monkeypatch.setattr(
+        backtest,
+        "_manage",
+        lambda _history, _legs, entry, _expiry, _price, _spec: (
+            entry + timedelta(days=1), -0.4, "early profit"
+        ),
+    )
+
+    result = simulate_condors(history, CondorSpec(dte_target=14, slippage=0.0))
+    traded_expiries = [build_occ("TEST", expiry, Right.PUT, 90)[4:10] for expiry in expiries]
+    assert result.n == 2
+    assert [trade.legs[0][4:10] for trade in result.trades] == traded_expiries
+
+
+def test_simulator_will_not_fake_settlement_beyond_a_slice(monkeypatch):
+    import aperture.backtest as backtest
+
+    start = date(2026, 1, 1)
+    future_expiry = date(2026, 2, 20)
+    history = OptionHistory(
+        underlying="TEST",
+        spot={start + timedelta(days=i): 100.0 for i in range(20)},
+        bars={build_occ("TEST", future_expiry, Right.PUT, 95): {start: 1.0}},
+    )
+    called = False
+
+    def should_not_pick(*args):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(backtest, "_pick_condor", should_not_pick)
+    assert simulate_condors(history, CondorSpec()).n == 0
+    assert not called
+
+
 def test_simulator_returns_nothing_when_history_is_too_short():
     history = OptionHistory(underlying="TEST")
     history.spot = {date(2026, 1, 5): 100.0}
@@ -298,6 +402,77 @@ def test_lab_does_nothing_without_history():
     report = run_lab(EmptyCLI(), underlying="TEST", seed=1)
     assert report.tested == 0
     assert report.promoted == []
+
+
+def test_lab_requires_the_selected_candidate_to_survive_a_separate_holdout(monkeypatch):
+    import aperture.research as research
+
+    start = date(2025, 1, 1)
+    history = OptionHistory(
+        underlying="TEST",
+        spot={start + timedelta(days=i): 100.0 for i in range(160)},
+        bars={
+            build_occ("TEST", date(2025, 5, 30), Right.PUT, 95): {
+                start + timedelta(days=i): 1.0 for i in range(160)
+            }
+        },
+    )
+    candidate = Candidate(
+        "CAND-ONE", CondorSpec(width_pct=0.015), "CARRY", "wider wings",
+        "reduce tail loss",
+    )
+    tried = []
+
+    class Gate:
+        def evaluate(self, result, incumbent, candidates_tried):
+            tried.append(candidates_tried)
+            if result.strategy_id.endswith("/holdout"):
+                return False, "failed unseen history"
+            return True, "passed selection"
+
+    monkeypatch.setattr(research, "load_history", lambda *args, **kwargs: history)
+    monkeypatch.setattr(
+        research, "hypothesize", lambda provider, spec, count, rng: [candidate]
+    )
+    monkeypatch.setattr(
+        research,
+        "simulate_condors",
+        lambda _history, _spec, strategy_id: BacktestResult(strategy_id=strategy_id),
+    )
+
+    report = run_lab(
+        object(), underlying="TEST", gate=Gate(), seed=1, prior_trials=11,
+        asof=date(2025, 7, 1),
+    )
+
+    assert report.promoted == []
+    assert report.rejected[0][2] == "holdout: failed unseen history"
+    assert report.multiple_testing_trials == 12
+    assert tried == [12, 12]
+    training_end = date.fromisoformat(report.training_window[1])
+    validation_start = date.fromisoformat(report.validation_window[0])
+    assert (validation_start - training_end).days >= 35
+
+
+def test_promotion_record_is_stable_and_carries_holdout_evidence():
+    from aperture.research import LabReport, promotion_records
+
+    candidate = Candidate("S5-WIDTH", CondorSpec(width_pct=0.015), "CARRY", "wider wings")
+    evidence = result_with(GOOD)
+    report = LabReport(
+        tested=8,
+        promoted=[(candidate, evidence, "selection and holdout survived")],
+        training_window=("2024-03-01", "2025-12-01"),
+        validation_window=("2026-01-05", "2026-07-29"),
+    )
+    first = promotion_records(report, underlying="SPY")[0]
+    second = promotion_records(report, underlying="SPY")[0]
+
+    assert first["strategy_id"] == second["strategy_id"]
+    assert first["strategy_id"].startswith("LAB-")
+    assert first["status"] == "probation"
+    assert first["backtest"]["trades"] == len(GOOD)
+    assert first["validation_window"] == report.validation_window
 
 
 # --------------------------------------------------------------------------- #

@@ -57,6 +57,7 @@ class OpenTrade:
     partial_close_qty: int = 0
     partial_close_pnl: float = 0.0
     partial_close_risk: float = 0.0
+    exit_policy: dict[str, Any] = field(default_factory=dict)
 
     @property
     def leg_set(self) -> set[str]:
@@ -76,6 +77,12 @@ class DeskState:
     open_trades: dict[str, OpenTrade] = field(default_factory=dict)
     closed: list[dict[str, Any]] = field(default_factory=list)
     allocations: dict[str, float] = field(default_factory=dict)
+    hired_strategies: list[dict[str, Any]] = field(default_factory=list)
+    research_history: list[dict[str, Any]] = field(default_factory=list)
+    research_trials: int = 0
+    last_research_date: str = ""
+    latest_letter: dict[str, Any] = field(default_factory=dict)
+    last_letter_date: str = ""
 
     # -- persistence ------------------------------------------------------ #
 
@@ -102,6 +109,12 @@ class DeskState:
             open_trades=trades,
             closed=raw.get("closed") or [],
             allocations=raw.get("allocations") or {},
+            hired_strategies=raw.get("hired_strategies") or [],
+            research_history=raw.get("research_history") or [],
+            research_trials=int(raw.get("research_trials") or 0),
+            last_research_date=raw.get("last_research_date", ""),
+            latest_letter=raw.get("latest_letter") or {},
+            last_letter_date=raw.get("last_letter_date", ""),
         )
 
     def save(self) -> None:
@@ -116,6 +129,12 @@ class DeskState:
             "open_trades": {k: asdict(v) for k, v in self.open_trades.items()},
             "closed": self.closed,
             "allocations": self.allocations,
+            "hired_strategies": self.hired_strategies,
+            "research_history": self.research_history[-30:],
+            "research_trials": self.research_trials,
+            "last_research_date": self.last_research_date,
+            "latest_letter": self.latest_letter,
+            "last_letter_date": self.last_letter_date,
         }
         # Write to a sibling then replace, so a crash mid-write cannot leave a
         # truncated ledger that the loader would refuse on the next cycle.

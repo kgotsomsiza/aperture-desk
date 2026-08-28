@@ -71,9 +71,19 @@ class Snapshot:
             "attribution": self._attribution(),
             "equity_curve": self._equity_curve(),
             "recent_decisions": self._decisions(),
+            "roster": self._roster(),
+            "research": self.state.research_history[-1] if self.state.research_history else None,
+            "shareholder_letter": self.state.latest_letter or None,
             "counts": {
-                "open": len(self.state.open_trades),
-                "closed": len(self.state.closed),
+                "open": sum(
+                    1 for trade in self.state.open_trades.values()
+                    if trade.status in {"open", "submitting_close", "pending_close"}
+                ),
+                "pending": sum(
+                    1 for trade in self.state.open_trades.values()
+                    if trade.status in {"submitting_entry", "pending_entry"}
+                ),
+                "closed": sum(1 for trade in self.state.closed if trade.get("pnl") is not None),
                 "vetoes": len(self.audit.vetoes(limit=1000)),
             },
         }
@@ -111,6 +121,8 @@ class Snapshot:
                 "net_price": t.net_price,
                 "max_loss": round(t.max_loss, 2),
                 "opened_at": t.opened_at,
+                "filled_at": t.filled_at,
+                "status": t.status,
                 "rationale": _clean(t.rationale),
                 "legs": t.legs,
             }
@@ -167,6 +179,29 @@ class Snapshot:
     def _decisions(self, limit: int = 40) -> list[dict[str, Any]]:
         rows = self.audit.tail(limit=limit)
         return [{f: _clean(r.get(f)) for f in AUDIT_FIELDS if r.get(f) is not None} for r in rows]
+
+    def _roster(self) -> list[dict[str, Any]]:
+        rows = [
+            {
+                "strategy": strategy,
+                "origin": "designed",
+                "status": "funded",
+                "weight": self.state.allocations.get(strategy),
+            }
+            for strategy in ("CARRY", "CRUSH", "DRIFT")
+        ]
+        for record in self.state.hired_strategies:
+            rows.append({
+                "strategy": record.get("strategy_id"),
+                "origin": "research_lab",
+                "status": record.get("status", "probation"),
+                "weight": record.get("weight", self.state.allocations.get(record.get("strategy_id"))),
+                "hired_at": record.get("hired_at"),
+                "mutation": _clean(record.get("mutation")),
+                "evidence": record.get("backtest"),
+                "reason": _clean(record.get("reason")),
+            })
+        return rows
 
 
 def _blank_row(strategy_id: str) -> dict[str, Any]:

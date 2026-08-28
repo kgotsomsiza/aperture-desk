@@ -295,6 +295,43 @@ def test_no_exit_in_between():
     assert exit_signal(-2.00, -1.50, CARRY_CONFIG) is None
 
 
+def test_research_hire_executes_the_promoted_moneyness_parameters():
+    from aperture.strategies.hired import HiredCondorStrategy
+
+    pool = {}
+    for strike, right, bid, ask in (
+        (95, Right.PUT, 0.35, 0.45),
+        (96, Right.PUT, 0.75, 0.85),
+        (104, Right.CALL, 0.75, 0.85),
+        (105, Right.CALL, 0.35, 0.45),
+    ):
+        item = snap(strike, right, bid, ask)
+        pool[item.symbol] = item
+
+    class HiredMD:
+        def spot(self, symbol):
+            return 100.0
+
+        def chain(self, *args, **kwargs):
+            return pool
+
+    record = {
+        "strategy_id": "LAB-ABCD1234",
+        "underlying": "SPY",
+        "spec": {
+            "short_pct": 0.04, "width_pct": 0.01, "dte_target": 17,
+            "take_profit": 0.60, "stop_multiple": 2.5, "slippage": 0.05,
+        },
+        "backtest": {"edge": 0.12, "t_stat": 4.1, "trades": 14},
+    }
+    proposal = HiredCondorStrategy(record).propose(HiredMD(), book(), 3_000.0)[0]
+
+    assert proposal.strategy_id == "LAB-ABCD1234"
+    assert len(proposal.legs) == 4
+    assert "historical edge +12.0%" in proposal.rationale
+    assert {leg.strike for leg in proposal.legs} == {95.0, 96.0, 104.0, 105.0}
+
+
 # --------------------------------------------------------------------------- #
 # Earnings timing
 # --------------------------------------------------------------------------- #

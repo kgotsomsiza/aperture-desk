@@ -74,6 +74,21 @@ class OptionHistory:
                 out.append(symbol)
         return sorted(out, key=lambda s: parse_occ(s).strike)
 
+    def between(self, start: date | None = None, end: date | None = None) -> "OptionHistory":
+        """Chronological slice used to keep selection and validation separate."""
+        def inside(day: date) -> bool:
+            return (start is None or day >= start) and (end is None or day <= end)
+
+        return OptionHistory(
+            underlying=self.underlying,
+            spot={day: value for day, value in self.spot.items() if inside(day)},
+            bars={
+                symbol: {day: value for day, value in table.items() if inside(day)}
+                for symbol, table in self.bars.items()
+                if any(inside(day) for day in table)
+            },
+        )
+
 
 @dataclass
 class SimulatedTrade:
@@ -324,18 +339,33 @@ class CondorSpec:
     take_profit: float = 0.50
     stop_multiple: float = 2.0
     slippage: float = 0.05
+    min_credit_to_width: float = 0.15
 
 
 def simulate_condors(
     history: OptionHistory, spec: CondorSpec, *, strategy_id: str = "CANDIDATE"
 ) -> BacktestResult:
-    """Walk forward, opening one condor per week and managing it to a rule."""
+    """Walk forward, opening at most one condor per expiry and managing it to a rule.
+
+    Treating an early exit and a re-entry into the same expiry as independent
+    observations inflates both the sample size and the t-statistic.  The lab is
+    deliberately stricter: one expiry is one opportunity, even if a profit
+    target is reached quickly.
+    """
     result = BacktestResult(strategy_id=strategy_id)
     sessions = history.sessions()
     if len(sessions) < 10:
         return result
 
-    expiries = sorted({parse_occ(s).expiry for s in history.bars})
+    # A chronological slice can still contain bars for a contract whose expiry
+    # lies beyond the slice.  Such a contract cannot be settled without looking
+    # into the future, so it is ineligible here.  This is essential at the
+    # training/holdout boundary.
+    expiries = sorted(
+        expiry
+        for expiry in {parse_occ(s).expiry for s in history.bars}
+        if expiry <= sessions[-1]
+    )
     open_until: date | None = None
 
     for today in sessions:
@@ -362,6 +392,11 @@ def simulate_condors(
         if entry >= 0:
             continue
 
+        strikes = [parse_occ(symbol).strike for symbol in legs]
+        width = max(strikes[1] - strikes[0], strikes[3] - strikes[2])
+        if width <= 0 or (-entry / width) < spec.min_credit_to_width:
+            continue
+
         max_loss = _max_loss(legs, entry)
         if max_loss <= 0:
             continue
@@ -377,7 +412,7 @@ def simulate_condors(
                 max_loss=max_loss, reason=reason,
             )
         )
-        open_until = exit_day
+        open_until = expiry
 
     return result
 
@@ -399,10 +434,14 @@ def _pick_condor(
 
     width = max(spot * spec.width_pct, 1.0)
     short_put = _nearest(puts, spot * (1 - spec.short_pct))
-    long_put = _nearest(puts, spot * (1 - spec.short_pct) - width)
     short_call = _nearest(calls, spot * (1 + spec.short_pct))
-    long_call = _nearest(calls, spot * (1 + spec.short_pct) + width)
-    if None in (short_put, long_put, short_call, long_call):
+    if short_put is None or short_call is None:
+        return None
+    # Anchor protective wings to the strikes that were actually selected.  This
+    # mirrors the live strategy when the ideal moneyness falls between listings.
+    long_put = _nearest(puts, parse_occ(short_put).strike - width)
+    long_call = _nearest(calls, parse_occ(short_call).strike + width)
+    if long_put is None or long_call is None:
         return None
 
     strikes = [parse_occ(s).strike for s in (long_put, short_put, short_call, long_call)]

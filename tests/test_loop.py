@@ -127,8 +127,14 @@ def trade(**overrides) -> OpenTrade:
 
 def test_state_round_trips_through_disk(tmp_path):
     state = DeskState(path=tmp_path / "desk.json")
-    state.record_open(trade())
+    state.record_open(trade(exit_policy={"take_profit_pct": 0.61}))
     state.observe_equity(105_000.0, date(2026, 9, 1))
+    state.hired_strategies = [{"strategy_id": "LAB-1234", "status": "probation"}]
+    state.research_history = [{"session": "2026-08-28", "tested": 8}]
+    state.research_trials = 8
+    state.last_research_date = "2026-08-28"
+    state.latest_letter = {"as_of": "2026-08-28", "text": "facts"}
+    state.last_letter_date = "2026-08-28"
     state.save()
 
     reloaded = DeskState.load(tmp_path / "desk.json")
@@ -137,6 +143,11 @@ def test_state_round_trips_through_disk(tmp_path):
     restored = reloaded.open_trades["k1"]
     assert restored.leg_sides == {"SPY260918P00630000": "sell", "SPY260918P00625000": "buy"}
     assert restored.max_loss == 700.0
+    assert restored.exit_policy == {"take_profit_pct": 0.61}
+    assert reloaded.hired_strategies[0]["strategy_id"] == "LAB-1234"
+    assert reloaded.research_trials == 8
+    assert reloaded.research_history[-1]["tested"] == 8
+    assert reloaded.latest_letter["text"] == "facts"
 
 
 def test_corrupt_ledger_raises_rather_than_reading_as_empty(tmp_path):
@@ -151,6 +162,31 @@ def test_missing_ledger_is_a_fresh_desk(tmp_path):
     state = DeskState.load(tmp_path / "nothing.json")
     assert state.open_trades == {}
     assert state.high_water_mark == 0.0
+
+
+def test_promoted_research_strategy_joins_the_live_roster_on_probation(tmp_path):
+    from aperture.loop import _priors, build_strategies
+
+    state = DeskState(path=tmp_path / "desk.json")
+    state.hired_strategies = [
+        {
+            "strategy_id": "LAB-ACTIVE",
+            "status": "probation",
+            "underlying": "SPY",
+            "spec": {"short_pct": 0.04, "width_pct": 0.01, "dte_target": 14},
+        },
+        {
+            "strategy_id": "LAB-FIRED",
+            "status": "fired",
+            "underlying": "SPY",
+            "spec": {},
+        },
+    ]
+
+    roster = {strategy.config.strategy_id for strategy in build_strategies(state)}
+    assert roster == {"CARRY", "CRUSH", "DRIFT", "LAB-ACTIVE"}
+    assert _priors(state)["LAB-ACTIVE"] == 0.0
+    assert "LAB-FIRED" not in _priors(state)
 
 
 def test_high_water_mark_only_ratchets_up(tmp_path):
@@ -290,7 +326,7 @@ def test_expired_unfilled_entry_is_not_scored_as_a_closed_trade(tmp_path):
 
 
 def test_filled_entry_uses_actual_price_and_fill_time(tmp_path):
-    pending = trade(status="pending_entry", order_id="o1")
+    pending = trade(status="pending_entry", order_id="o1", rationale="why this trade exists")
     state, audit, result = sync_pending(
         tmp_path, pending,
         {
@@ -306,6 +342,7 @@ def test_filled_entry_uses_actual_price_and_fill_time(tmp_path):
     assert filled.opened_at == "2026-09-01T15:05:00Z"
     assert result["entries_filled"] == 1
     assert audit.tail()[-1]["event"] == "entry_filled"
+    assert audit.tail()[-1]["rationale"] == "why this trade exists"
 
 
 def test_expired_partial_entry_keeps_only_the_filled_quantity(tmp_path):
@@ -613,6 +650,49 @@ def test_snapshot_attribution_groups_by_strategy(tmp_path):
     rows = {r["strategy"]: r for r in payload["attribution"]}
     assert rows["CARRY"]["open"] == 1
     assert rows["CARRY"]["risk_at_work"] == 700.0
+
+
+def test_snapshot_exposes_hiring_research_and_reasoning_without_private_state(tmp_path):
+    from aperture.snapshot import Snapshot as PublicSnapshot, assert_publishable
+    from aperture.warden import AuditLog
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.start_equity = 100_000.0
+    state.allocations = {"CARRY": 0.60, "CRUSH": 0.18, "DRIFT": 0.17, "LAB-1234": 0.05}
+    state.hired_strategies = [{
+        "strategy_id": "LAB-1234",
+        "status": "probation",
+        "weight": 0.05,
+        "hired_at": "2026-08-28T20:00:00Z",
+        "mutation": "wider wings",
+        "backtest": {"trades": 12, "edge": 0.08, "t_stat": 4.2},
+        "reason": "selection and holdout survived",
+    }]
+    state.research_history = [{
+        "session": "2026-08-28",
+        "tested": 8,
+        "cumulative_trials": 16,
+        "promoted": ["LAB-1234"],
+        "reasoning": {"vendor": "featherless", "fast_model": "Qwen/test"},
+    }]
+    state.latest_letter = {
+        "as_of": "2026-08-28",
+        "text": "The desk reported only deterministic facts.",
+        "reasoning": {"vendor": "featherless", "reasoning_model": "Kimi/test"},
+    }
+    payload = PublicSnapshot(
+        state=state,
+        audit=AuditLog(path=tmp_path / "audit.jsonl"),
+        cli=FakeCLI(),
+    ).build()
+
+    hired = next(row for row in payload["roster"] if row["strategy"] == "LAB-1234")
+    assert hired["status"] == "probation"
+    assert hired["evidence"]["trades"] == 12
+    assert payload["research"]["cumulative_trials"] == 16
+    assert payload["research"]["reasoning"]["vendor"] == "featherless"
+    assert payload["shareholder_letter"]["reasoning"]["reasoning_model"] == "Kimi/test"
+    assert_publishable(payload)
 
 
 def test_publish_guard_rejects_a_leaked_identifier(tmp_path):

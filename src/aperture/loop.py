@@ -38,6 +38,7 @@ from .contracts import PositionIntent
 from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
 from .state import DeskState, OpenTrade
 from .strategies import carry, crush, drift
+from .strategies.hired import HiredCondorStrategy
 from .strategies.base import Strategy, structure_price
 from .warden import AuditLog, RiskWarden
 
@@ -66,13 +67,17 @@ FLATTEN_FROM = datetime(2026, 9, 3, 14, 0, tzinfo=ET)
 TERMINAL_ORDER_STATUSES = {"canceled", "expired", "rejected"}
 
 
-def build_strategies() -> list[Strategy]:
+def build_strategies(state: DeskState | None = None) -> list[Strategy]:
     calendar = EarningsCalendar()
-    return [
+    strategies: list[Strategy] = [
         carry.CarryStrategy(),
         crush.CrushStrategy(calendar=calendar),
         drift.DriftStrategy(calendar=calendar),
     ]
+    for record in (state.hired_strategies if state else []):
+        if record.get("status", "probation") not in {"fired", "retired"}:
+            strategies.append(HiredCondorStrategy(record))
+    return strategies
 
 
 def build_book(
@@ -214,11 +219,20 @@ def run_cycle(
     #    before anyone is asked for proposals -- a fired strategy should not get
     #    the chance to propose, and a promoted one should feel it this cycle.
     allocations = Allocator().allocate(
-        observe(state, warden.audit, PRIOR_WEIGHTS), book.equity
+        observe(state, warden.audit, _priors(state)), book.equity
     )
     warden.budgets = {a.strategy_id: a.budget for a in allocations}
     fired = {a.strategy_id for a in allocations if not a.is_active}
     summary["fired"] = sorted(fired)
+
+    allocation_by_id = {a.strategy_id: a for a in allocations}
+    for record in state.hired_strategies:
+        allocation = allocation_by_id.get(str(record.get("strategy_id")))
+        if allocation is not None:
+            record["status"] = allocation.status
+            record["weight"] = allocation.weight
+            record["budget"] = allocation.budget
+            record["allocation_reason"] = allocation.reason
 
     previous = state.allocations or {}
     current = {a.strategy_id: a.weight for a in allocations}
@@ -335,6 +349,7 @@ def _submit_if_approved(
         status="submitting_entry",
         leg_sides={leg.symbol: leg.side.value for leg in proposal.legs},
         leg_ratios={leg.symbol: leg.ratio for leg in proposal.legs},
+        exit_policy=_exit_policy_for(proposal.strategy_id, state),
     )
     state.record_open(trade)
     state.save()
@@ -625,6 +640,7 @@ def sync_order_lifecycle(
                 qty=filled_qty,
                 net_price=fill_price,
                 max_loss=max_loss,
+                rationale=trade.rationale,
             )
             log.info("ENTRY FILLED %s x%d @ %+.2f", trade.underlying, filled_qty, fill_price)
             continue
@@ -829,6 +845,15 @@ def exit_reason(trade: OpenTrade, current_price: float, *, today=None) -> str | 
         return "earnings window elapsed; CRUSH holds one night" if today > opened_day else None
 
     config = _config_for(trade.strategy_id)
+    if trade.exit_policy:
+        config = config.child(
+            take_profit_pct=float(
+                trade.exit_policy.get("take_profit_pct", config.take_profit_pct)
+            ),
+            stop_loss_multiple=float(
+                trade.exit_policy.get("stop_loss_multiple", config.stop_loss_multiple)
+            ),
+        )
     if trade.net_price < 0:
         return carry.exit_signal(trade.net_price, current_price, config)
     return drift.exit_signal(trade.net_price, current_price, config)
@@ -1037,6 +1062,18 @@ def _config_for(strategy_id: str):
     }.get(strategy_id, carry.DEFAULT_CONFIG)
 
 
+def _exit_policy_for(strategy_id: str, state: DeskState) -> dict:
+    for record in state.hired_strategies:
+        if record.get("strategy_id") != strategy_id:
+            continue
+        spec = record.get("spec") or {}
+        return {
+            "take_profit_pct": float(spec.get("take_profit", 0.50)),
+            "stop_loss_multiple": float(spec.get("stop_multiple", 2.0)),
+        }
+    return {}
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -1083,7 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    summary = run_cycle(cli, md, warden, state, build_strategies(), dry_run=args.dry_run)
+    summary = run_cycle(cli, md, warden, state, build_strategies(state), dry_run=args.dry_run)
     log.info(
         "cycle complete: %d approved (%d submitted), %d vetoed, %d closed%s",
         summary["approved"],
@@ -1098,6 +1135,14 @@ def main(argv: list[str] | None = None) -> int:
 # The designed barbell, as shares of the total risk budget. These are the
 # allocator's prior, not a fixed schedule: from here the desk funds what works.
 PRIOR_WEIGHTS = {"CARRY": 0.64, "CRUSH": 0.18, "DRIFT": 0.18}
+
+
+def _priors(state: DeskState) -> dict[str, float]:
+    priors = dict(PRIOR_WEIGHTS)
+    for record in state.hired_strategies:
+        if record.get("status", "probation") not in {"fired", "retired"}:
+            priors.setdefault(str(record["strategy_id"]), 0.0)
+    return priors
 
 
 def _budgets(equity: float) -> dict[str, float]:

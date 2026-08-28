@@ -358,3 +358,15 @@ def build_provider() -> LLMProvider:
 
     log.info("no LLM provider configured; running deterministic strategies only")
     return NullProvider()
+
+
+def provider_info(provider: LLMProvider) -> dict[str, Any]:
+    """Public, credential-free evidence of what reasoning layer is active."""
+    if isinstance(provider, NullProvider):
+        return {"vendor": "none", "fast_model": None, "reasoning_model": None}
+    return {
+        "vendor": str(getattr(provider, "label", provider.__class__.__name__)).lower(),
+        "fast_model": getattr(provider, "fast_model", None),
+        "reasoning_model": getattr(provider, "reasoning_model", None),
+        "json_mode": getattr(provider, "json_mode", None),
+    }
