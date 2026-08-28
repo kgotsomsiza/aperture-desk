@@ -29,7 +29,13 @@ from pathlib import Path
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
 from .identity import WrongAccountError
-from .loop import DEADLINE, build_strategies, run_cycle
+from .loop import (
+    DEADLINE,
+    build_strategies,
+    emergency_flatten_cycle,
+    run_cycle,
+    sync_order_lifecycle,
+)
 from .marketdata import MarketData
 from .risk import RiskLimits
 from .snapshot import Snapshot, write
@@ -95,11 +101,37 @@ class Runner:
                 budgets=_budgets(state.start_equity or self.args.equity),
             )
 
-            if warden.halted():
-                log.critical("kill switch engaged; holding")
-                return MAX_SLEEP
-
             clock = self.cli.clock()
+            # Orders expire and late fills settle even after the bell.  Keep the
+            # ledger truthful while closed, but never recover a not-yet-accepted
+            # submission until the market is open again.
+            sync_order_lifecycle(
+                self.cli,
+                state,
+                warden,
+                allow_submission_recovery=bool(clock.get("is_open")),
+            )
+
+            if warden.halted():
+                if not clock.get("is_open"):
+                    log.critical("kill switch engaged; market closed, flatten resumes next open")
+                    return self._until_open(clock)
+                result = emergency_flatten_cycle(
+                    self.cli,
+                    self.md,
+                    warden,
+                    state,
+                    dry_run=self.args.dry_run,
+                    require_expected=not self.args.dry_run,
+                )
+                log.critical(
+                    "kill switch flatten: %d confirmed closed, %d close orders submitted, "
+                    "%d remaining",
+                    result["closed"], result["close_submitted"], result["remaining"],
+                )
+                self.consecutive_failures = 0
+                return self.args.interval
+
             if not clock.get("is_open"):
                 return self._until_open(clock)
 

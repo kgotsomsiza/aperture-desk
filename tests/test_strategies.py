@@ -81,6 +81,18 @@ def test_snapshot_without_open_interest_is_marked_unknown():
     assert parsed.to_leg_quote().open_interest == -1
 
 
+def test_missing_or_malformed_quote_time_fails_closed_as_stale():
+    missing = parse_snapshot(
+        "SPY260918P00630000", {"latestQuote": {"bp": 1.0, "ap": 1.2}}
+    )
+    malformed = parse_snapshot(
+        "SPY260918P00630000",
+        {"latestQuote": {"bp": 1.0, "ap": 1.2, "t": "not-a-timestamp"}},
+    )
+    assert missing.quote_ts.year == 1970
+    assert malformed.quote_ts.year == 1970
+
+
 def test_zero_bid_contract_is_not_priceable():
     assert not snap(600, Right.PUT, 0.0, 0.05).is_priceable
 

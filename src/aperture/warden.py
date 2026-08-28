@@ -13,6 +13,7 @@ desk did something.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -104,8 +105,24 @@ class RiskWarden:
         return verdict
 
     def _record(self, proposal: Proposal, verdict: Verdict, book: BookState) -> None:
+        # Price and size can move every cycle while the economic idea is the
+        # same.  A stable daily identity lets the allocator count that idea once
+        # instead of treating twelve five-minute retries as twelve independent
+        # failures.
+        identity = "|".join(
+            [
+                book.now.date().isoformat(),
+                proposal.strategy_id,
+                proposal.underlying,
+                *sorted(
+                    f"{leg.symbol}:{leg.side.value}:{leg.ratio}"
+                    for leg in proposal.legs
+                ),
+            ]
+        )
         self.audit.record(
             "approval" if verdict.approved else "veto",
+            proposal_id=hashlib.sha256(identity.encode()).hexdigest()[:20],
             strategy=proposal.strategy_id,
             underlying=proposal.underlying,
             qty=proposal.qty,

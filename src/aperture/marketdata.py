@@ -51,12 +51,16 @@ def _bars_of(payload: dict[str, Any] | None, symbol: str) -> list[dict[str, Any]
 
 
 def _parse_ts(value: Any) -> datetime:
+    # Missing or malformed timestamps must fail the freshness gate.  Treating
+    # them as "now" silently turns unknown data into the freshest possible data.
+    stale = datetime(1970, 1, 1, tzinfo=timezone.utc)
     if not value:
-        return datetime.now(timezone.utc)
+        return stale
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(timezone.utc)
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return stale
 
 
 @dataclass(frozen=True)

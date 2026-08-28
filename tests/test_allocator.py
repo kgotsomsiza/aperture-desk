@@ -264,7 +264,9 @@ def test_observe_reads_both_the_ledger_and_the_veto_log(tmp_path):
     assert records["CRUSH"].wins == 1
     assert records["CRUSH"].realized_pnl == pytest.approx(150.0)
     assert records["CRUSH"].edge == pytest.approx(150.0 / 2_000.0)
-    assert records["DRIFT"].proposals == 2 and records["DRIFT"].vetoes == 2
+    # Identical five-minute retries are one economic proposal, not two
+    # independent observations that can fire a strategy in forty minutes.
+    assert records["DRIFT"].proposals == 1 and records["DRIFT"].vetoes == 1
     assert records["DRIFT"].veto_rate == 1.0
 
 

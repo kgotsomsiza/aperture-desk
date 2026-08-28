@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from .allocator import Allocator, observe, summarise
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
-from .contracts import Side
+from .contracts import Side, parse_occ
 from .earnings import EarningsCalendar
 from .identity import WrongAccountError, check as check_account
 from .marketdata import MarketData, Snapshot
@@ -62,6 +62,8 @@ DEADLINE = SCORING_CLOSE  # what the tournament clock scales against
 # held through that is a bet on a macro print, priced at the worst quotes of the
 # week. Being flat converts the result into cash, which cannot be re-marked.
 FLATTEN_FROM = datetime(2026, 9, 3, 14, 0, tzinfo=ET)
+
+TERMINAL_ORDER_STATUSES = {"canceled", "expired", "rejected"}
 
 
 def build_strategies() -> list[Strategy]:
@@ -149,6 +151,16 @@ def run_cycle(
         return summary
 
     book = build_book(cli, state, now, require_expected=require_expected)
+
+    # Submission acceptance is not execution.  Resolve pending entries and
+    # closes against the parent mleg order before the ledger is compared with
+    # positions or any strategy is allowed to spend the reserved risk again.
+    lifecycle = sync_order_lifecycle(cli, state, warden)
+    summary["closed"] += lifecycle["closed"]
+
+    # Refresh the state-backed part of the book after fill reconciliation.
+    book.open_risk_by_strategy = state.open_risk_by_strategy()
+    book.open_risk_by_underlying = state.open_risk_by_underlying()
     log.info(
         "equity $%s | drawdown %.2f%% | day %+.2f%% | open risk $%s",
         f"{book.equity:,.0f}",
@@ -158,9 +170,19 @@ def run_cycle(
     )
 
     # 1. Reconcile the ledger against the broker before trusting any of it.
-    broker_symbols = {p.get("symbol") for p in cli.positions()}
+    broker_positions = cli.positions()
+    broker_symbols = {p.get("symbol") for p in broker_positions}
     for vanished in state.reconcile(broker_symbols):
         warden.audit.record("reconcile", client_order_id=vanished)
+
+    mismatches = position_mismatches(state, broker_positions, now=now)
+    if mismatches:
+        detail = "; ".join(mismatches[:8])
+        summary["breached"] = f"broker/ledger position mismatch: {detail}"
+        warden.audit.record("position_mismatch", reason=detail, count=len(mismatches))
+        warden.engage_kill_switch(summary["breached"])
+        state.save()
+        return summary
 
     # 2. Endgame: past the flatten point, the only job is to be in cash.
     if now >= FLATTEN_FROM:
@@ -169,6 +191,7 @@ def run_cycle(
             "endgame: past %s, closing everything and opening nothing",
             FLATTEN_FROM.strftime("%d %b %H:%M ET"),
         )
+        _cancel_pending_entries(cli, state, warden, dry_run=dry_run)
         summary["closed"] += _flatten(cli, md, state, warden, dry_run=dry_run)
         state.save()
         return summary
@@ -179,6 +202,7 @@ def run_cycle(
         summary["breached"] = breach
         warden.audit.record("breach", reason=breach, equity=book.equity)
         log.critical("BREACH: %s", breach)
+        _cancel_pending_entries(cli, state, warden, dry_run=dry_run)
         summary["closed"] += _derisk(cli, md, state, warden, dry_run=dry_run)
         state.save()
         return summary
@@ -252,6 +276,29 @@ def _submit_if_approved(
     said no" are opposite results and collapsing them into one boolean makes the
     cycle summary lie about what the desk decided.
     """
+    # A strategy gets one live intent per underlying.  The broker can hold a
+    # day limit for nearly an hour before filling it; repricing that proposal on
+    # every five-minute cycle otherwise creates several orders that can all fill
+    # later, long after the ledger has forgotten the first one.
+    duplicate = next(
+        (
+            trade for trade in state.open_trades.values()
+            if trade.strategy_id == proposal.strategy_id
+            and trade.underlying == proposal.underlying
+            and trade.status in {
+                "submitting_entry", "pending_entry", "open",
+                "submitting_close", "pending_close",
+            }
+        ),
+        None,
+    )
+    if duplicate is not None:
+        log.info(
+            "skipping duplicate intent: %s already has %s %s",
+            proposal.strategy_id, duplicate.status, proposal.underlying,
+        )
+        return "duplicate"
+
     symbols = [leg.symbol for leg in proposal.legs]
     quotes = md.leg_quotes(symbols, proposal.underlying)
 
@@ -259,7 +306,9 @@ def _submit_if_approved(
     if not verdict.approved:
         return "vetoed"
 
-    key = idempotency_key(proposal)
+    # The day salt keeps a legitimate retry on a later session from colliding
+    # with yesterday's expired client id.  Within a session it stays stable.
+    key = idempotency_key(proposal, salt=book.now.date().isoformat())
     if key in state.open_trades:
         log.info("skipping %s: already in the ledger", key)
         return "duplicate"
@@ -268,18 +317,10 @@ def _submit_if_approved(
         log.info("[dry-run] would submit %s", proposal.rationale)
         return "dry_run"
 
-    try:
-        order = cli.submit_mleg(proposal, client_order_id=key)
-    except AlpacaCliError as exc:
-        warden.audit.record(
-            "submit_failed",
-            strategy=proposal.strategy_id,
-            underlying=proposal.underlying,
-            error=exc.stderr[:300],
-        )
-        log.error("submit failed for %s: %s", proposal.underlying, exc.stderr[:200])
-        return "failed"
-
+    # Write-ahead reservation.  If the process dies after the HTTP request
+    # reaches Alpaca but before its response reaches us, the next process sees
+    # this intent and recovers it by the same client id instead of submitting a
+    # second order.
     trade = OpenTrade(
         client_order_id=key,
         strategy_id=proposal.strategy_id,
@@ -290,13 +331,43 @@ def _submit_if_approved(
         max_loss=verdict.profile.max_loss_or_inf,
         opened_at=datetime.now(timezone.utc).isoformat(),
         rationale=proposal.rationale,
-        order_id=(order or {}).get("id"),
-        status="open",
+        order_id=None,
+        status="submitting_entry",
         leg_sides={leg.symbol: leg.side.value for leg in proposal.legs},
+        leg_ratios={leg.symbol: leg.ratio for leg in proposal.legs},
     )
     state.record_open(trade)
+    state.save()
     warden.audit.record(
-        "submitted",
+        "entry_reserved",
+        client_order_id=key,
+        strategy=proposal.strategy_id,
+        underlying=proposal.underlying,
+        qty=proposal.qty,
+        net_price=proposal.net_price,
+        rationale=proposal.rationale,
+    )
+
+    try:
+        order = cli.submit_mleg(proposal, client_order_id=key)
+    except AlpacaCliError as exc:
+        # Deliberately keep the reservation.  The failure may be a timeout after
+        # acceptance; lifecycle recovery first queries this exact client id.
+        warden.audit.record(
+            "entry_submission_uncertain",
+            client_order_id=key,
+            strategy=proposal.strategy_id,
+            underlying=proposal.underlying,
+            error=exc.stderr[:300],
+        )
+        log.error("entry submission uncertain for %s: %s", proposal.underlying, exc.stderr[:200])
+        return "failed"
+
+    trade.order_id = (order or {}).get("id")
+    trade.status = "pending_entry"
+    state.save()
+    warden.audit.record(
+        "entry_submitted",
         client_order_id=key,
         order_id=trade.order_id,
         strategy=proposal.strategy_id,
@@ -305,8 +376,413 @@ def _submit_if_approved(
         net_price=proposal.net_price,
         rationale=proposal.rationale,
     )
-    log.info("SUBMITTED %s", proposal.rationale)
+    log.info("ENTRY SUBMITTED (awaiting fill) %s", proposal.rationale)
     return "submitted"
+
+
+def _order_for_trade(cli: AlpacaCLI, trade: OpenTrade, *, closing: bool = False) -> dict:
+    order_id = trade.close_order_id if closing else trade.order_id
+    client_id = trade.close_client_order_id if closing else trade.client_order_id
+    if order_id:
+        return cli.order(order_id)
+    return cli.order_by_client_id(client_id)
+
+
+def _order_not_found(exc: AlpacaCliError) -> bool:
+    text = exc.stderr.lower()
+    return "40410000" in text or ("404" in text and "order not found" in text)
+
+
+def _filled_qty(order: dict) -> int:
+    try:
+        return max(int(float(order.get("filled_qty") or 0)), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _filled_price(order: dict) -> float | None:
+    try:
+        return float(order.get("filled_avg_price"))
+    except (TypeError, ValueError):
+        pass
+
+    # Parent mleg fills normally carry a signed average.  If that field is ever
+    # absent, reconstruct the signed net from the nested leg fills rather than
+    # pretending the submitted limit was the execution price.
+    total = 0.0
+    legs = order.get("legs") or []
+    if not legs:
+        return None
+    for leg in legs:
+        try:
+            price = float(leg.get("filled_avg_price"))
+            ratio = int(float(leg.get("ratio_qty") or 1))
+        except (TypeError, ValueError):
+            return None
+        side = str(leg.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            return None
+        total += price * ratio if side == "buy" else -price * ratio
+    return round(total, 4)
+
+
+def _filled_entry_max_loss(trade: OpenTrade, qty: int, net_price: float) -> float:
+    """Recompute risk from the actual fill, not the submitted limit."""
+    legs = []
+    for symbol in trade.legs:
+        side = Side(trade.leg_sides[symbol])
+        intent = (
+            PositionIntent.BUY_TO_OPEN if side is Side.BUY
+            else PositionIntent.SELL_TO_OPEN
+        )
+        legs.append(Leg(symbol, side, trade.leg_ratios.get(symbol, 1), intent))
+    proposal = Proposal(
+        strategy_id=trade.strategy_id,
+        underlying=trade.underlying,
+        legs=tuple(legs),
+        qty=qty,
+        net_price=net_price,
+        rationale=trade.rationale,
+    )
+    return analyse_payoff(proposal).max_loss_or_inf
+
+
+def _entry_proposal_from_trade(trade: OpenTrade) -> Proposal:
+    legs = []
+    for symbol in trade.legs:
+        side = Side(trade.leg_sides[symbol])
+        intent = (
+            PositionIntent.BUY_TO_OPEN if side is Side.BUY
+            else PositionIntent.SELL_TO_OPEN
+        )
+        legs.append(Leg(symbol, side, trade.leg_ratios.get(symbol, 1), intent))
+    return Proposal(
+        strategy_id=trade.strategy_id,
+        underlying=trade.underlying,
+        legs=tuple(legs),
+        qty=trade.qty,
+        net_price=trade.net_price,
+        rationale=trade.rationale,
+    )
+
+
+def _pending_close_proposal(trade: OpenTrade) -> Proposal:
+    if trade.close_limit_price is None:
+        raise ValueError("pending close has no persisted limit price")
+    legs = []
+    for symbol in trade.legs:
+        opened_side = Side(trade.leg_sides[symbol])
+        side = Side.SELL if opened_side is Side.BUY else Side.BUY
+        intent = (
+            PositionIntent.SELL_TO_CLOSE if side is Side.SELL
+            else PositionIntent.BUY_TO_CLOSE
+        )
+        legs.append(Leg(symbol, side, trade.leg_ratios.get(symbol, 1), intent))
+    return Proposal(
+        strategy_id=trade.strategy_id,
+        underlying=trade.underlying,
+        legs=tuple(legs),
+        qty=trade.qty,
+        net_price=trade.close_limit_price,
+        rationale=f"closing {trade.client_order_id}",
+    )
+
+
+def _recover_reserved_submission(
+    cli: AlpacaCLI, state: DeskState, trade: OpenTrade, warden: RiskWarden
+) -> bool:
+    closing = trade.status == "submitting_close"
+    if warden.halted() and not closing:
+        state.discard_pending(trade.client_order_id)
+        state.save()
+        warden.audit.record(
+            "entry_abandoned",
+            client_order_id=trade.client_order_id,
+            strategy=trade.strategy_id,
+            underlying=trade.underlying,
+            reason="kill switch engaged before broker accepted reserved entry",
+        )
+        return True
+    try:
+        proposal = _pending_close_proposal(trade) if closing else _entry_proposal_from_trade(trade)
+        client_id = trade.close_client_order_id if closing else trade.client_order_id
+        order = cli.submit_mleg(proposal, client_order_id=client_id)
+    except (AlpacaCliError, ValueError) as exc:
+        detail = exc.stderr[:300] if isinstance(exc, AlpacaCliError) else str(exc)
+        warden.audit.record(
+            "submission_recovery_failed",
+            client_order_id=(trade.close_client_order_id if closing else trade.client_order_id),
+            strategy=trade.strategy_id,
+            underlying=trade.underlying,
+            error=detail,
+        )
+        return False
+
+    if closing:
+        trade.close_order_id = (order or {}).get("id")
+        trade.status = "pending_close"
+    else:
+        trade.order_id = (order or {}).get("id")
+        trade.status = "pending_entry"
+    state.save()
+    warden.audit.record(
+        "submission_recovered",
+        client_order_id=(trade.close_client_order_id if closing else trade.client_order_id),
+        order_id=(order or {}).get("id"),
+        strategy=trade.strategy_id,
+        underlying=trade.underlying,
+        side="close" if closing else "entry",
+    )
+    return True
+
+
+def sync_order_lifecycle(
+    cli: AlpacaCLI,
+    state: DeskState,
+    warden: RiskWarden,
+    *,
+    allow_submission_recovery: bool = True,
+) -> dict[str, int]:
+    """Resolve pending parent orders into fills or terminal non-events.
+
+    Errors keep the reservation in place.  That is conservative on purpose: an
+    unknown order must continue consuming its full risk budget until the broker
+    can tell us whether it filled.
+    """
+    summary = {"entries_filled": 0, "entries_unfilled": 0, "closed": 0}
+    for trade in list(state.open_trades.values()):
+        if trade.status not in {
+            "submitting_entry", "pending_entry", "submitting_close", "pending_close"
+        }:
+            continue
+        closing = trade.status in {"submitting_close", "pending_close"}
+        try:
+            order = _order_for_trade(cli, trade, closing=closing)
+        except AlpacaCliError as exc:
+            if (
+                allow_submission_recovery
+                and trade.status in {"submitting_entry", "submitting_close"}
+                and _order_not_found(exc)
+            ):
+                _recover_reserved_submission(cli, state, trade, warden)
+                continue
+            warden.audit.record(
+                "order_sync_error",
+                client_order_id=(
+                    trade.close_client_order_id if closing else trade.client_order_id
+                ),
+                error=exc.stderr[:300],
+            )
+            log.warning("could not reconcile order for %s: %s", trade.underlying, exc.stderr[:120])
+            continue
+
+        status = str(order.get("status") or "").lower()
+        filled_qty = _filled_qty(order)
+        terminal = status == "filled" or status in TERMINAL_ORDER_STATUSES
+        if not terminal:
+            continue
+
+        if trade.status in {"submitting_entry", "pending_entry"}:
+            if filled_qty <= 0:
+                state.discard_pending(trade.client_order_id)
+                summary["entries_unfilled"] += 1
+                warden.audit.record(
+                    "entry_unfilled",
+                    client_order_id=trade.client_order_id,
+                    strategy=trade.strategy_id,
+                    underlying=trade.underlying,
+                    order_status=status,
+                )
+                state.save()
+                continue
+
+            fill_price = _filled_price(order)
+            if fill_price is None:
+                warden.audit.record(
+                    "fill_price_missing",
+                    client_order_id=trade.client_order_id,
+                    strategy=trade.strategy_id,
+                    underlying=trade.underlying,
+                    order_status=status,
+                )
+                continue
+            max_loss = _filled_entry_max_loss(trade, filled_qty, fill_price)
+            state.confirm_entry(
+                trade.client_order_id,
+                qty=filled_qty,
+                net_price=fill_price,
+                max_loss=max_loss,
+                filled_at=order.get("filled_at"),
+            )
+            state.save()
+            summary["entries_filled"] += 1
+            warden.audit.record(
+                "entry_filled",
+                client_order_id=trade.client_order_id,
+                order_id=trade.order_id,
+                strategy=trade.strategy_id,
+                underlying=trade.underlying,
+                qty=filled_qty,
+                net_price=fill_price,
+                max_loss=max_loss,
+            )
+            log.info("ENTRY FILLED %s x%d @ %+.2f", trade.underlying, filled_qty, fill_price)
+            continue
+
+        # A close can also finish partially.  Record only broker-confirmed units
+        # and return any remainder to open management.
+        if filled_qty <= 0:
+            reason = trade.close_reason or "close"
+            close_client_id = trade.close_client_order_id
+            state.reopen_after_unfilled_close(trade.client_order_id)
+            state.save()
+            warden.audit.record(
+                "close_unfilled",
+                client_order_id=trade.client_order_id,
+                close_client_order_id=close_client_id,
+                strategy=trade.strategy_id,
+                underlying=trade.underlying,
+                order_status=status,
+                reason=reason,
+            )
+            continue
+
+        close_price = _filled_price(order)
+        if close_price is None:
+            warden.audit.record(
+                "fill_price_missing",
+                client_order_id=trade.close_client_order_id,
+                strategy=trade.strategy_id,
+                underlying=trade.underlying,
+                order_status=status,
+            )
+            continue
+        close_qty = min(filled_qty, trade.qty)
+        pnl = round(-(trade.net_price + close_price) * close_qty * 100, 2)
+        reason = trade.close_reason or "close filled"
+        closed_row = state.record_filled_close(
+            trade.client_order_id,
+            qty=close_qty,
+            reason=reason,
+            pnl=pnl,
+            close_price=close_price,
+            closed_at=order.get("filled_at"),
+        )
+        state.save()
+        event = "closed" if closed_row is not None else "partial_close"
+        if closed_row is not None:
+            summary["closed"] += 1
+        warden.audit.record(
+            event,
+            client_order_id=trade.client_order_id,
+            strategy=trade.strategy_id,
+            underlying=trade.underlying,
+            qty=close_qty,
+            close_price=close_price,
+            pnl=pnl,
+            reason=reason,
+        )
+        log.info("CLOSE FILLED %s x%d | P&L $%+.2f", trade.underlying, close_qty, pnl)
+
+    return summary
+
+
+def emergency_flatten_cycle(
+    cli: AlpacaCLI,
+    md: MarketData,
+    warden: RiskWarden,
+    state: DeskState,
+    *,
+    dry_run: bool = False,
+    require_expected: bool = False,
+) -> dict[str, int]:
+    """Cancel new risk and work every known structure toward a confirmed close.
+
+    This is the operational meaning of the kill switch.  It runs repeatedly
+    while the market is open: pending closes are reconciled first, unfilled
+    entries are canceled, and only broker-confirmed fills leave the ledger.
+    """
+    now = datetime.now(ET)
+    build_book(cli, state, now, require_expected=require_expected)
+    lifecycle = sync_order_lifecycle(cli, state, warden)
+
+    broker_positions = cli.positions()
+    broker_symbols = {p.get("symbol") for p in broker_positions}
+    for vanished in state.reconcile(broker_symbols):
+        warden.audit.record("reconcile", client_order_id=vanished)
+
+    _cancel_pending_entries(cli, state, warden, dry_run=dry_run)
+    before = sum(1 for trade in state.open_trades.values() if trade.status == "open")
+    _flatten(cli, md, state, warden, dry_run=dry_run)
+    after = sum(1 for trade in state.open_trades.values() if trade.status == "open")
+    state.save()
+    return {
+        "closed": lifecycle["closed"],
+        "close_submitted": max(before - after, 0),
+        "remaining": len(state.open_trades),
+    }
+
+
+def _recent_fill(trade: OpenTrade, now: datetime, grace_seconds: float = 600.0) -> bool:
+    if not trade.filled_at:
+        return False
+    try:
+        stamp = datetime.fromisoformat(trade.filled_at.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    return (now.astimezone(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds() \
+        <= grace_seconds
+
+
+def position_mismatches(
+    state: DeskState,
+    broker_positions: Sequence[dict],
+    *,
+    now: datetime | None = None,
+) -> list[str]:
+    """Compare signed per-leg quantities once no order is in flight.
+
+    Symbol presence alone cannot catch a ledger that says 215/200 x2 while the
+    broker owns 215/195 x1.  Pending orders and just-filled positions are allowed
+    a short propagation window; settled structures must match exactly.
+    """
+    now = now or datetime.now(timezone.utc)
+    expected: dict[str, float] = {}
+    flexible: set[str] = set()
+
+    for trade in state.open_trades.values():
+        in_flight = trade.status in {
+            "submitting_entry", "pending_entry", "submitting_close", "pending_close"
+        }
+        if in_flight or _recent_fill(trade, now):
+            flexible.update(trade.legs)
+        if trade.status in {"open", "submitting_close", "pending_close"}:
+            for symbol in trade.legs:
+                ratio = trade.leg_ratios.get(symbol, 1)
+                sign = 1 if Side(trade.leg_sides[symbol]) is Side.BUY else -1
+                expected[symbol] = expected.get(symbol, 0.0) + sign * trade.qty * ratio
+
+    actual: dict[str, float] = {}
+    for position in broker_positions:
+        symbol = str(position.get("symbol") or "")
+        try:
+            parse_occ(symbol)
+            qty = float(position.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        actual[symbol] = actual.get(symbol, 0.0) + qty
+
+    issues = []
+    for symbol in sorted(set(expected) | set(actual)):
+        if symbol in flexible:
+            continue
+        wanted = expected.get(symbol, 0.0)
+        found = actual.get(symbol, 0.0)
+        if abs(wanted - found) > 1e-9:
+            issues.append(f"{symbol} ledger {wanted:+g}, broker {found:+g}")
+    return issues
 
 
 def manage_exits(
@@ -325,20 +801,37 @@ def manage_exits(
         if price is None:
             continue
 
-        config = _config_for(trade.strategy_id)
-        if trade.net_price < 0:
-            reason = carry.exit_signal(trade.net_price, price, config)
-        else:
-            reason = drift.exit_signal(trade.net_price, price, config)
+        reason = exit_reason(trade, price)
         if reason is None:
             continue
 
         if dry_run:
             log.info("[dry-run] would close %s: %s", trade.underlying, reason)
             continue
-        if _close_trade(cli, md, state, warden, trade, reason):
-            closed += 1
+        _close_trade(cli, md, state, warden, trade, reason)
     return closed
+
+
+def exit_reason(trade: OpenTrade, current_price: float, *, today=None) -> str | None:
+    """Apply the owning strategy's exit contract, not the trade's price sign."""
+    if trade.strategy_id == "CRUSH":
+        today = today or datetime.now(ET).date()
+        raw = trade.filled_at or trade.opened_at
+        try:
+            opened = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            opened_day = opened.astimezone(ET).date()
+        except (TypeError, ValueError):
+            # An unreadable timestamp is not permission to hold an event trade
+            # indefinitely.  Surface it as an immediate, explicit exit.
+            return "CRUSH entry timestamp invalid; fail-safe close"
+        return "earnings window elapsed; CRUSH holds one night" if today > opened_day else None
+
+    config = _config_for(trade.strategy_id)
+    if trade.net_price < 0:
+        return carry.exit_signal(trade.net_price, current_price, config)
+    return drift.exit_signal(trade.net_price, current_price, config)
 
 
 def _flatten(
@@ -351,11 +844,12 @@ def _flatten(
     """
     closed = 0
     for trade in list(state.open_trades.values()):
+        if trade.status != "open":
+            continue
         if dry_run:
             log.info("[dry-run] would flatten %s", trade.underlying)
             continue
-        if _close_trade(cli, md, state, warden, trade, "endgame flatten"):
-            closed += 1
+        _close_trade(cli, md, state, warden, trade, "endgame flatten")
     return closed
 
 
@@ -368,13 +862,14 @@ def _derisk(
     """
     closed = 0
     for trade in list(state.open_trades.values()):
+        if trade.status != "open":
+            continue
         if _config_for(trade.strategy_id).sleeve != "CONVEX":
             continue
         if dry_run:
             log.info("[dry-run] would de-risk %s", trade.underlying)
             continue
-        if _close_trade(cli, md, state, warden, trade, "circuit breaker de-risk"):
-            closed += 1
+        _close_trade(cli, md, state, warden, trade, "circuit breaker de-risk")
     return closed
 
 
@@ -390,9 +885,15 @@ def build_closing_proposal(trade: OpenTrade, price: float) -> Proposal:
     for symbol in trade.legs:
         opened_side = Side(trade.leg_sides[symbol])
         if opened_side is Side.BUY:
-            legs.append(Leg(symbol, Side.SELL, 1, PositionIntent.SELL_TO_CLOSE))
+            legs.append(Leg(
+                symbol, Side.SELL, trade.leg_ratios.get(symbol, 1),
+                PositionIntent.SELL_TO_CLOSE,
+            ))
         else:
-            legs.append(Leg(symbol, Side.BUY, 1, PositionIntent.BUY_TO_CLOSE))
+            legs.append(Leg(
+                symbol, Side.BUY, trade.leg_ratios.get(symbol, 1),
+                PositionIntent.BUY_TO_CLOSE,
+            ))
 
     return Proposal(
         strategy_id=trade.strategy_id,
@@ -422,31 +923,110 @@ def _close_trade(
     Verified the hard way on 27 Aug: `position close-all` on a live iron condor
     closed both shorts and left both longs open.
     """
+    if trade.status != "open":
+        return False
+
     price = current_structure_price(md, trade)
     if price is None:
         log.warning("cannot price %s to close; will retry next cycle", trade.underlying)
         return False
 
     proposal = build_closing_proposal(trade, price)
-    try:
-        cli.submit_mleg(proposal, client_order_id=f"close-{trade.client_order_id}"[:128])
-    except AlpacaCliError as exc:
-        warden.audit.record(
-            "close_failed", client_order_id=trade.client_order_id, error=exc.stderr[:300]
-        )
-        log.error("CLOSE FAILED on %s - %s", trade.underlying, exc.stderr[:160])
-        return False
+    close_client_id = f"close-{trade.client_order_id}-{trade.close_attempts + 1}"[:128]
 
-    state.record_close(trade.client_order_id, reason)
+    # The close gets the same write-ahead treatment as an entry.  A process
+    # crash can delay a close, but it cannot erase a possibly-live close order
+    # from the ledger and send a second one on restart.
+    state.mark_close_pending(
+        trade.client_order_id,
+        order_id=None,
+        close_client_order_id=close_client_id,
+        reason=reason,
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        limit_price=proposal.net_price,
+    )
+    state.save()
     warden.audit.record(
-        "closed",
+        "close_reserved",
         client_order_id=trade.client_order_id,
+        close_client_order_id=close_client_id,
         strategy=trade.strategy_id,
         underlying=trade.underlying,
         reason=reason,
     )
-    log.info("CLOSED %s - %s", trade.underlying, reason)
+
+    try:
+        order = cli.submit_mleg(proposal, client_order_id=close_client_id)
+    except AlpacaCliError as exc:
+        warden.audit.record(
+            "close_submission_uncertain",
+            client_order_id=trade.client_order_id,
+            close_client_order_id=close_client_id,
+            error=exc.stderr[:300],
+        )
+        log.error("CLOSE SUBMISSION UNCERTAIN on %s - %s", trade.underlying, exc.stderr[:160])
+        return False
+
+    state.confirm_close_submission(
+        trade.client_order_id,
+        order_id=(order or {}).get("id"),
+        limit_price=proposal.net_price,
+    )
+    state.save()
+    warden.audit.record(
+        "close_submitted",
+        client_order_id=trade.client_order_id,
+        close_client_order_id=close_client_id,
+        order_id=(order or {}).get("id"),
+        strategy=trade.strategy_id,
+        underlying=trade.underlying,
+        reason=reason,
+    )
+    log.info("CLOSE SUBMITTED (awaiting fill) %s - %s", trade.underlying, reason)
     return True
+
+
+def _cancel_pending_entries(
+    cli: AlpacaCLI,
+    state: DeskState,
+    warden: RiskWarden,
+    *,
+    dry_run: bool,
+) -> int:
+    """Withdraw every not-yet-filled entry when the desk may no longer add risk."""
+    requested = 0
+    for trade in list(state.open_trades.values()):
+        if trade.status not in {"submitting_entry", "pending_entry"}:
+            continue
+        if dry_run:
+            log.info("[dry-run] would cancel pending entry %s", trade.underlying)
+            continue
+        if not trade.order_id:
+            # Keep the risk reservation.  Without an id, the next lifecycle poll
+            # uses the client id; silently dropping it would be the unsafe move.
+            log.warning("cannot cancel %s yet: broker order id is unavailable", trade.underlying)
+            continue
+        try:
+            cli.cancel_order(trade.order_id)
+        except AlpacaCliError as exc:
+            # The usual race is that it filled between the poll and the cancel.
+            # Leave it pending so the next sync resolves the truth.
+            warden.audit.record(
+                "entry_cancel_failed",
+                client_order_id=trade.client_order_id,
+                strategy=trade.strategy_id,
+                underlying=trade.underlying,
+                error=exc.stderr[:300],
+            )
+            continue
+        requested += 1
+        warden.audit.record(
+            "entry_cancel_requested",
+            client_order_id=trade.client_order_id,
+            strategy=trade.strategy_id,
+            underlying=trade.underlying,
+        )
+    return requested
 
 
 def _config_for(strategy_id: str):
@@ -489,7 +1069,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if warden.halted():
-        log.critical("kill switch is engaged; no trading this cycle")
+        clock = cli.clock()
+        if not clock.get("is_open"):
+            sync_order_lifecycle(cli, state, warden, allow_submission_recovery=False)
+            log.critical("kill switch engaged; market closed, flatten resumes next open")
+            return 2
+        result = emergency_flatten_cycle(
+            cli, md, warden, state, dry_run=args.dry_run, require_expected=not args.dry_run
+        )
+        log.critical(
+            "kill switch flatten: %d confirmed closed, %d close orders submitted, %d remaining",
+            result["closed"], result["close_submitted"], result["remaining"],
+        )
         return 2
 
     summary = run_cycle(cli, md, warden, state, build_strategies(), dry_run=args.dry_run)

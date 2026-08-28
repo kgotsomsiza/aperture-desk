@@ -14,7 +14,9 @@ that overstates itself is worse than none:
     history, so strikes are chosen by *moneyness* rather than delta. A 15-delta
     short is approximated as a fixed percentage out of the money, which is close
     at the tenors traded here and wrong in a volatility spike.
-  * **Mid-price fills, minus a fixed concession.** No queue, no partial fills.
+  * **Last-trade closes, with a fixed adverse concession.** Alpaca historical
+    option bars do not contain quote mids. Cross-leg timestamps can differ, so
+    even this conservative adjustment cannot prove the structure was fillable.
   * **Survivorship is not an issue** (contracts do not disappear) **but liquidity
     is**: a strike that never traded still has bars, and the simulator cannot
     tell that nobody would have filled you there.
@@ -353,6 +355,13 @@ def simulate_condors(
         if entry is None or entry >= 0:
             continue  # a condor that is not a credit is not this structure
 
+        # A credit fill worse than the observed composite mark is closer to
+        # zero: -1.00 becomes -0.95.  Charging this at entry as well as exit is
+        # essential; otherwise every simulated round trip gets a free fill.
+        entry += spec.slippage
+        if entry >= 0:
+            continue
+
         max_loss = _max_loss(legs, entry)
         if max_loss <= 0:
             continue
@@ -448,9 +457,12 @@ def _manage(
         cost_to_close = abs(current)
 
         if cost_to_close <= credit * (1 - spec.take_profit):
-            return day, current + spec.slippage, "take profit"
+            # ``current`` uses the original holding orientation (negative for a
+            # short condor).  Paying an adverse close makes that equivalent mark
+            # *more* negative: -0.50 becomes -0.55, not -0.45.
+            return day, current - spec.slippage, "take profit"
         if cost_to_close >= credit * spec.stop_multiple:
-            return day, current + spec.slippage, "stop"
+            return day, current - spec.slippage, "stop"
 
     # Fell through to expiry: settle at intrinsic against the final spot.
     final = max((d for d in history.spot if d <= expiry), default=None)

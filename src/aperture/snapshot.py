@@ -126,6 +126,8 @@ class Snapshot:
             row["risk_at_work"] += trade.max_loss
 
         for closed in self.state.closed:
+            if closed.get("pnl") is None:
+                continue
             row = table.setdefault(closed["strategy_id"], _blank_row(closed["strategy_id"]))
             row["closed"] += 1
             pnl = closed.get("pnl")

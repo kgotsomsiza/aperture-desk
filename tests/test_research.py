@@ -241,6 +241,43 @@ def test_simulator_produces_trades_on_a_workable_history():
     assert result.total_pnl > 0
 
 
+def test_simulator_charges_slippage_adversely_on_both_sides(monkeypatch):
+    expiry = date(2026, 2, 20)
+    history = build_history(
+        [100.0] * 40,
+        expiry,
+        [92.0, 94.0, 96.0, 100.0, 104.0, 106.0, 108.0],
+    )
+
+    mid = simulate_condors(
+        history, CondorSpec(short_pct=0.04, width_pct=0.02, slippage=0.0)
+    )
+    charged = simulate_condors(
+        history, CondorSpec(short_pct=0.04, width_pct=0.02, slippage=0.05)
+    )
+
+    assert mid.n and charged.n
+    # Worse credit at entry is closer to zero; the equivalent holding mark at
+    # exit is more negative because buying it back costs more.
+    assert charged.trades[0].entry_price == pytest.approx(mid.trades[0].entry_price + 0.05)
+    assert charged.trades[0].pnl < mid.trades[0].pnl
+
+    # Isolate the exit sign: a -0.40 holding mark means a +0.40 debit to close.
+    # The adverse fill is +0.45, represented in the simulator as -0.45.
+    import aperture.backtest as backtest
+    start = date(2026, 1, 5)
+    small = OptionHistory(underlying="TEST", spot={
+        start: 100.0,
+        start + timedelta(days=1): 100.0,
+    })
+    monkeypatch.setattr(backtest, "_price", lambda *args: -0.40)
+    _, exit_price, _ = backtest._manage(
+        small, ("a", "b", "c", "d"), start, start + timedelta(days=7),
+        -1.00, CondorSpec(slippage=0.05),
+    )
+    assert exit_price == pytest.approx(-0.45)
+
+
 def test_simulator_returns_nothing_when_history_is_too_short():
     history = OptionHistory(underlying="TEST")
     history.spot = {date(2026, 1, 5): 100.0}

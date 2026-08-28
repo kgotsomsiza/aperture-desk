@@ -23,7 +23,14 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class OpenTrade:
-    """One structure the desk believes it owns."""
+    """One submitted structure and its broker-confirmed lifecycle.
+
+    An accepted limit order is only a reservation (``pending_entry``).  It does
+    not become ``open`` until Alpaca reports a fill, and a close does not leave
+    the ledger until its own mleg order fills.  Keeping those states explicit is
+    what prevents an unfilled day order from being mistaken for a vanished
+    position and submitted again every cycle.
+    """
 
     client_order_id: str
     strategy_id: str
@@ -36,9 +43,20 @@ class OpenTrade:
     # Side per leg, kept explicitly: the structure's closing price cannot be
     # reconstructed from the net price alone for anything past two legs.
     leg_sides: dict[str, str] = field(default_factory=dict)
+    leg_ratios: dict[str, int] = field(default_factory=dict)
     rationale: str = ""
     order_id: str | None = None
-    status: str = "pending"  # pending -> open -> closed
+    status: str = "pending_entry"
+    filled_at: str | None = None
+    close_order_id: str | None = None
+    close_client_order_id: str | None = None
+    close_submitted_at: str | None = None
+    close_reason: str | None = None
+    close_limit_price: float | None = None
+    close_attempts: int = 0
+    partial_close_qty: int = 0
+    partial_close_pnl: float = 0.0
+    partial_close_risk: float = 0.0
 
     @property
     def leg_set(self) -> set[str]:
@@ -119,6 +137,135 @@ class DeskState:
     def record_open(self, trade: OpenTrade) -> None:
         self.open_trades[trade.client_order_id] = trade
 
+    def confirm_entry(
+        self,
+        client_order_id: str,
+        *,
+        qty: int,
+        net_price: float,
+        max_loss: float,
+        filled_at: str | None,
+    ) -> OpenTrade | None:
+        """Promote a reserved entry only after the broker reports a fill."""
+        trade = self.open_trades.get(client_order_id)
+        if trade is None or qty <= 0:
+            return None
+        trade.qty = qty
+        trade.net_price = net_price
+        trade.max_loss = max_loss
+        trade.status = "open"
+        trade.filled_at = filled_at
+        if filled_at:
+            trade.opened_at = filled_at
+        return trade
+
+    def discard_pending(self, client_order_id: str) -> OpenTrade | None:
+        """Remove an entry that reached a terminal state without any fill.
+
+        It deliberately does not enter ``closed``: an order that never traded
+        is execution evidence, not a losing trade for the allocator.
+        """
+        trade = self.open_trades.get(client_order_id)
+        if trade is None or trade.status not in {"submitting_entry", "pending_entry"}:
+            return None
+        return self.open_trades.pop(client_order_id)
+
+    def mark_close_pending(
+        self,
+        client_order_id: str,
+        *,
+        order_id: str | None,
+        close_client_order_id: str,
+        reason: str,
+        submitted_at: str,
+        limit_price: float,
+    ) -> OpenTrade | None:
+        trade = self.open_trades.get(client_order_id)
+        if trade is None:
+            return None
+        trade.status = "pending_close"
+        trade.close_order_id = order_id
+        trade.close_client_order_id = close_client_order_id
+        trade.close_submitted_at = submitted_at
+        trade.close_reason = reason
+        trade.close_limit_price = limit_price
+        trade.close_attempts += 1
+        trade.status = "submitting_close"
+        return trade
+
+    def confirm_close_submission(
+        self,
+        client_order_id: str,
+        *,
+        order_id: str | None,
+        limit_price: float,
+    ) -> OpenTrade | None:
+        trade = self.open_trades.get(client_order_id)
+        if trade is None or trade.status not in {"submitting_close", "pending_close"}:
+            return None
+        trade.close_order_id = order_id
+        trade.close_limit_price = limit_price
+        trade.status = "pending_close"
+        return trade
+
+    def reopen_after_unfilled_close(self, client_order_id: str) -> OpenTrade | None:
+        trade = self.open_trades.get(client_order_id)
+        if trade is None or trade.status not in {"submitting_close", "pending_close"}:
+            return None
+        trade.status = "open"
+        trade.close_order_id = None
+        trade.close_client_order_id = None
+        trade.close_submitted_at = None
+        trade.close_reason = None
+        trade.close_limit_price = None
+        return trade
+
+    def record_filled_close(
+        self,
+        client_order_id: str,
+        *,
+        qty: int,
+        reason: str,
+        pnl: float,
+        close_price: float,
+        closed_at: str | None,
+    ) -> dict[str, Any] | None:
+        """Record a confirmed full or partial close and retain any remainder."""
+        trade = self.open_trades.get(client_order_id)
+        if trade is None or qty <= 0:
+            return None
+
+        closed_qty = min(qty, trade.qty)
+        risk_per_unit = trade.max_loss / trade.qty if trade.qty > 0 else 0.0
+        closed_risk = risk_per_unit * closed_qty
+        if closed_qty >= trade.qty:
+            row = {
+                **asdict(trade),
+                "qty": trade.partial_close_qty + closed_qty,
+                "max_loss": trade.partial_close_risk + closed_risk,
+                "status": "closed",
+                "closed_at": closed_at or datetime.now(timezone.utc).isoformat(),
+                "close_reason": reason,
+                "close_price": close_price,
+                "pnl": round(trade.partial_close_pnl + pnl, 2),
+            }
+            self.closed.append(row)
+            self.open_trades.pop(client_order_id, None)
+        else:
+            trade.partial_close_qty += closed_qty
+            trade.partial_close_pnl += pnl
+            trade.partial_close_risk += closed_risk
+            trade.qty -= closed_qty
+            trade.max_loss = risk_per_unit * trade.qty
+            trade.status = "open"
+            trade.close_order_id = None
+            trade.close_client_order_id = None
+            trade.close_submitted_at = None
+            trade.close_reason = None
+            trade.close_limit_price = None
+            return None
+        return row
+
     def record_close(self, client_order_id: str, reason: str, pnl: float | None = None) -> None:
         trade = self.open_trades.pop(client_order_id, None)
         if trade is None:
@@ -149,18 +296,38 @@ class DeskState:
     def trades_for(self, strategy_id: str) -> list[OpenTrade]:
         return [t for t in self.open_trades.values() if t.strategy_id == strategy_id]
 
-    def reconcile(self, broker_symbols: set[str]) -> list[str]:
+    def reconcile(
+        self,
+        broker_symbols: set[str],
+        *,
+        now: datetime | None = None,
+        fill_grace_seconds: float = 600.0,
+    ) -> list[str]:
         """Drop trades the broker no longer shows, and report what was dropped.
 
         Positions disappear for reasons the desk did not initiate — expiry,
         assignment, auto-exercise. Carrying a phantom trade in the ledger would
         keep consuming a strategy's budget forever.
         """
-        vanished = [
-            key
-            for key, trade in self.open_trades.items()
-            if trade.status == "open" and not (trade.leg_set & broker_symbols)
-        ]
+        now = now or datetime.now(timezone.utc)
+        vanished = []
+        for key, trade in self.open_trades.items():
+            if trade.status != "open" or trade.leg_set & broker_symbols:
+                continue
+            # The order endpoint can report a fill a few seconds before the
+            # positions endpoint reflects its legs.  Do not turn that normal
+            # propagation race into another phantom close.
+            if trade.filled_at:
+                try:
+                    stamp = datetime.fromisoformat(trade.filled_at.replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    if (now.astimezone(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds() \
+                            <= fill_grace_seconds:
+                        continue
+                except ValueError:
+                    pass
+            vanished.append(key)
         for key in vanished:
             log.warning("reconcile: %s no longer at broker, closing in ledger", key)
             self.record_close(key, reason="vanished at broker (expiry/assignment?)")

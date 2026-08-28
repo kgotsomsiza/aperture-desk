@@ -25,6 +25,7 @@ from typing import Any
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
 from .contracts import Right, build_occ, parse_occ
+from .identity import WrongAccountError, check as check_identity
 from .risk import Leg, PositionIntent, Proposal, Side, analyse_payoff
 
 PASS, FAIL, WARN, INFO = "PASS", "FAIL", "WARN", "INFO"
@@ -77,7 +78,9 @@ def check_cli(cli: AlpacaCLI, report: Report) -> None:
     report.add(PASS, "alpaca CLI on PATH", f"{version} at {cli.binary}")
 
 
-def check_account(cli: AlpacaCLI, report: Report) -> dict[str, Any]:
+def check_account(
+    cli: AlpacaCLI, report: Report, *, require_fresh_equity: bool = True
+) -> dict[str, Any]:
     try:
         account = cli.account()
     except AlpacaCliError as exc:
@@ -87,12 +90,25 @@ def check_account(cli: AlpacaCLI, report: Report) -> dict[str, Any]:
     # Never print the account number: it is a submission-form value, not a log value.
     report.add(PASS, "authentication", "credentials accepted")
 
+    try:
+        check_identity(account, recorded=None, require_expected=True)
+    except WrongAccountError as exc:
+        report.add(FAIL, "expected account identity", str(exc))
+    else:
+        report.add(PASS, "expected account identity", "named account matches credentials")
+
     equity = float(account.get("equity", 0))
+    fresh = abs(equity - 100_000.0) <= 0.01
+    equity_ok = fresh if require_fresh_equity else equity > 0
     report.add(
-        PASS if equity > 0 else FAIL,
+        PASS if equity_ok else FAIL,
         "equity",
         f"${equity:,.2f}"
-        + ("" if abs(equity - 100_000) < 1 else "  <-- hackathon rules require $100,000"),
+        + (
+            ""
+            if fresh or not require_fresh_equity
+            else "  <-- fresh judged account must be exactly $100,000.00"
+        ),
     )
 
     level = account.get("options_trading_level")
@@ -350,13 +366,18 @@ def main(argv: list[str] | None = None) -> int:
         help="also send one real 1-lot defined-risk spread to prove the fill path",
     )
     parser.add_argument("--binary", default="alpaca", help="path to the alpaca CLI")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume an already-traded account; relax only the fresh $100,000 equity check",
+    )
     args = parser.parse_args(argv)
 
     report = Report()
     cli = AlpacaCLI(binary=args.binary)
 
     check_cli(cli, report)
-    check_account(cli, report)
+    check_account(cli, report, require_fresh_equity=not args.resume)
     check_clock(cli, report)
     feed = check_data_feed(cli, report)
     spot = check_greeks_and_staleness(cli, report, feed)

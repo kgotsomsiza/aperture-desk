@@ -99,6 +99,20 @@ class AlpacaCLI:
     def orders(self, status: str = "open") -> list[dict[str, Any]]:
         return self.run("order", "list", "--status", status) or []
 
+    def order(self, order_id: str) -> dict[str, Any]:
+        """Return one order, including its fill state.
+
+        Submission acceptance is not a fill.  The desk polls the parent mleg
+        order before it promotes a pending ledger reservation into a position.
+        """
+        return self.run("order", "get", "--order-id", order_id, "--nested") or {}
+
+    def order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
+        """Recover an order when Alpaca accepted it without returning an id."""
+        return self.run(
+            "order", "get-by-client-id", "--client-order-id", client_order_id
+        ) or {}
+
     def portfolio_history(self, period: str = "1W", timeframe: str = "1H") -> dict[str, Any]:
         return self.run("account", "portfolio", "--period", period, "--timeframe", timeframe)
 

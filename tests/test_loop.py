@@ -204,6 +204,256 @@ def test_reconcile_keeps_a_partially_present_structure(tmp_path):
     assert "half" in state.open_trades
 
 
+def test_position_reconciliation_compares_signed_leg_quantities(tmp_path):
+    from aperture.loop import position_mismatches
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.record_open(trade())
+    correct = [
+        {"symbol": "SPY260918P00630000", "qty": "-2"},
+        {"symbol": "SPY260918P00625000", "qty": "2"},
+    ]
+    assert position_mismatches(state, correct, now=NOW) == []
+
+    wrong = [
+        {"symbol": "SPY260918P00630000", "qty": "-4"},
+        {"symbol": "SPY260918P00620000", "qty": "4"},
+    ]
+    issues = position_mismatches(state, wrong, now=NOW)
+    assert any("broker -4" in issue for issue in issues)
+    assert any("broker +0" in issue for issue in issues)
+    assert any("00620000" in issue for issue in issues)
+
+
+def test_just_filled_position_gets_a_propagation_grace_period(tmp_path):
+    from aperture.loop import position_mismatches
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.record_open(trade(filled_at=NOW.astimezone(timezone.utc).isoformat()))
+    assert position_mismatches(state, [], now=NOW) == []
+
+    later = NOW + timedelta(minutes=11)
+    assert position_mismatches(state, [], now=later)
+
+
+# --------------------------------------------------------------------------- #
+# Broker-confirmed order lifecycle
+# --------------------------------------------------------------------------- #
+
+
+class OrderCLI:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def order(self, order_id):
+        return dict(self.payload)
+
+    def order_by_client_id(self, client_order_id):
+        return dict(self.payload)
+
+
+def sync_pending(tmp_path, pending, payload):
+    from aperture.loop import sync_order_lifecycle
+    from aperture.warden import AuditLog, RiskWarden
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.record_open(pending)
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+    result = sync_order_lifecycle(OrderCLI(payload), state, RiskWarden(audit=audit))
+    return state, audit, result
+
+
+def test_accepted_entry_stays_pending_and_reserves_risk(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, _, result = sync_pending(
+        tmp_path, pending,
+        {"status": "accepted", "filled_qty": "0", "limit_price": "-1.50"},
+    )
+
+    assert state.open_trades["k1"].status == "pending_entry"
+    assert state.open_risk_by_strategy() == {"CARRY": 700.0}
+    assert state.closed == []
+    assert result == {"entries_filled": 0, "entries_unfilled": 0, "closed": 0}
+
+
+def test_expired_unfilled_entry_is_not_scored_as_a_closed_trade(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, audit, result = sync_pending(
+        tmp_path, pending,
+        {"status": "expired", "filled_qty": "0", "limit_price": "-1.50"},
+    )
+
+    assert state.open_trades == {}
+    assert state.closed == []
+    assert result["entries_unfilled"] == 1
+    assert audit.tail()[-1]["event"] == "entry_unfilled"
+
+
+def test_filled_entry_uses_actual_price_and_fill_time(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, audit, result = sync_pending(
+        tmp_path, pending,
+        {
+            "status": "filled", "filled_qty": "2", "limit_price": "-1.50",
+            "filled_avg_price": "-1.60", "filled_at": "2026-09-01T15:05:00Z",
+        },
+    )
+
+    filled = state.open_trades["k1"]
+    assert filled.status == "open"
+    assert filled.net_price == pytest.approx(-1.60)
+    assert filled.max_loss == pytest.approx(680.0)
+    assert filled.opened_at == "2026-09-01T15:05:00Z"
+    assert result["entries_filled"] == 1
+    assert audit.tail()[-1]["event"] == "entry_filled"
+
+
+def test_expired_partial_entry_keeps_only_the_filled_quantity(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, _, _ = sync_pending(
+        tmp_path, pending,
+        {"status": "expired", "filled_qty": "1", "filled_avg_price": "-1.60"},
+    )
+
+    filled = state.open_trades["k1"]
+    assert filled.status == "open"
+    assert filled.qty == 1
+    assert filled.max_loss == pytest.approx(340.0)
+
+
+def test_nested_leg_fills_reconstruct_a_missing_parent_fill_price(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, _, _ = sync_pending(
+        tmp_path, pending,
+        {
+            "status": "filled", "filled_qty": "2",
+            "legs": [
+                {"side": "sell", "filled_avg_price": "2.00", "ratio_qty": "1"},
+                {"side": "buy", "filled_avg_price": "0.40", "ratio_qty": "1"},
+            ],
+        },
+    )
+    assert state.open_trades["k1"].net_price == pytest.approx(-1.60)
+
+
+def test_fill_without_any_execution_price_stays_reserved(tmp_path):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, audit, result = sync_pending(
+        tmp_path, pending, {"status": "filled", "filled_qty": "2"}
+    )
+    assert state.open_trades["k1"].status == "pending_entry"
+    assert state.closed == []
+    assert result["entries_filled"] == 0
+    assert audit.tail()[-1]["event"] == "fill_price_missing"
+
+
+def test_write_ahead_entry_recovers_by_the_same_client_id(tmp_path):
+    from aperture.alpaca_cli import AlpacaCliError
+    from aperture.loop import sync_order_lifecycle
+    from aperture.warden import AuditLog, RiskWarden
+
+    class RecoverCLI:
+        def __init__(self):
+            self.submitted = []
+
+        def order_by_client_id(self, client_order_id):
+            raise AlpacaCliError(
+                ["order", "get-by-client-id"], 1,
+                '{"code":40410000,"status":404,"error":"order not found"}',
+            )
+
+        def submit_mleg(self, proposal, client_order_id=None):
+            self.submitted.append(client_order_id)
+            return {"id": "recovered-order"}
+
+    state = DeskState(path=tmp_path / "d.json")
+    state.record_open(trade(status="submitting_entry", order_id=None))
+    state.save()
+    cli = RecoverCLI()
+    sync_order_lifecycle(
+        cli, state, RiskWarden(audit=AuditLog(path=tmp_path / "audit.jsonl"))
+    )
+
+    assert cli.submitted == ["k1"]
+    assert state.open_trades["k1"].status == "pending_entry"
+    assert state.open_trades["k1"].order_id == "recovered-order"
+    assert DeskState.load(state.path).open_trades["k1"].order_id == "recovered-order"
+
+
+def test_filled_close_records_realized_pnl_only_after_confirmation(tmp_path):
+    pending = trade(status="pending_close", order_id="open1", close_order_id="close1",
+                    close_client_order_id="close-k1-1", close_reason="take profit")
+    state, audit, result = sync_pending(
+        tmp_path, pending,
+        {
+            "status": "filled", "filled_qty": "2", "filled_avg_price": "0.50",
+            "filled_at": "2026-09-02T15:00:00Z",
+        },
+    )
+
+    assert state.open_trades == {}
+    assert result["closed"] == 1
+    assert state.closed[0]["status"] == "closed"
+    assert state.closed[0]["pnl"] == pytest.approx(200.0)
+    assert state.closed[0]["close_price"] == pytest.approx(0.50)
+    assert audit.tail()[-1]["event"] == "closed"
+
+
+def test_unfilled_close_reopens_the_position(tmp_path):
+    pending = trade(status="pending_close", order_id="open1", close_order_id="close1",
+                    close_client_order_id="close-k1-1", close_reason="take profit")
+    state, audit, result = sync_pending(
+        tmp_path, pending,
+        {"status": "expired", "filled_qty": "0", "limit_price": "0.50"},
+    )
+
+    reopened = state.open_trades["k1"]
+    assert reopened.status == "open"
+    assert reopened.close_order_id is None
+    assert state.closed == []
+    assert result["closed"] == 0
+    assert audit.tail()[-1]["event"] == "close_unfilled"
+
+
+def test_partial_close_reduces_open_quantity_and_risk(tmp_path):
+    pending = trade(status="pending_close", order_id="open1", close_order_id="close1",
+                    close_client_order_id="close-k1-1", close_reason="take profit")
+    state, _, _ = sync_pending(
+        tmp_path, pending,
+        {"status": "canceled", "filled_qty": "1", "filled_avg_price": "0.50"},
+    )
+
+    # A partial execution is not a second independent "trade" for the
+    # allocator.  It accumulates on the original until that trade is flat.
+    assert state.closed == []
+    remainder = state.open_trades["k1"]
+    assert remainder.status == "open"
+    assert remainder.qty == 1
+    assert remainder.max_loss == pytest.approx(350.0)
+    assert remainder.partial_close_qty == 1
+    assert remainder.partial_close_pnl == pytest.approx(100.0)
+    assert remainder.partial_close_risk == pytest.approx(350.0)
+
+    state.mark_close_pending(
+        "k1", order_id="close2", close_client_order_id="close-k1-2",
+        reason="take profit", submitted_at="2026-09-02T15:05:00Z", limit_price=0.50,
+    )
+    state.confirm_close_submission("k1", order_id="close2", limit_price=0.50)
+
+    from aperture.loop import sync_order_lifecycle
+    from aperture.warden import AuditLog, RiskWarden
+    sync_order_lifecycle(
+        OrderCLI({"status": "filled", "filled_qty": "1", "filled_avg_price": "0.50"}),
+        state,
+        RiskWarden(audit=AuditLog(path=tmp_path / "second.jsonl")),
+    )
+    assert state.open_trades == {}
+    assert len(state.closed) == 1
+    assert state.closed[0]["qty"] == 2
+    assert state.closed[0]["max_loss"] == pytest.approx(700.0)
+    assert state.closed[0]["pnl"] == pytest.approx(200.0)
+
+
 # --------------------------------------------------------------------------- #
 # Structure pricing on exit
 # --------------------------------------------------------------------------- #
@@ -498,6 +748,25 @@ def test_closing_price_mirrors_the_structure():
     assert build_closing_proposal(trade(), price=2.00).net_price == pytest.approx(-1.95)
 
 
+def test_crush_exit_is_next_session_regardless_of_credit_or_debit():
+    from aperture.loop import exit_reason
+
+    opened = "2026-09-01T19:55:00Z"  # 15:55 ET
+    credit = trade(strategy_id="CRUSH", net_price=-1.50, filled_at=opened)
+    debit = trade(strategy_id="CRUSH", net_price=2.00, filled_at=opened)
+
+    assert exit_reason(credit, -0.90, today=date(2026, 9, 1)) is None
+    assert "one night" in exit_reason(credit, -0.90, today=date(2026, 9, 2))
+    assert "one night" in exit_reason(debit, 1.50, today=date(2026, 9, 2))
+
+
+def test_crush_invalid_timestamp_fails_safe_to_close():
+    from aperture.loop import exit_reason
+
+    broken = trade(strategy_id="CRUSH", filled_at="not-a-time")
+    assert "fail-safe" in exit_reason(broken, -1.0, today=date(2026, 9, 1))
+
+
 def test_closing_an_iron_condor_keeps_all_four_legs_together():
     four = trade(
         legs=["SPY260918P00625000", "SPY260918P00630000",
@@ -513,6 +782,37 @@ def test_closing_an_iron_condor_keeps_all_four_legs_together():
     assert sides["SPY260918C00660000"] is Side.BUY    # short call bought back
     assert sides["SPY260918P00625000"] is Side.SELL   # long put sold
     assert sides["SPY260918C00665000"] is Side.SELL   # long call sold
+
+
+def test_close_is_persisted_before_an_uncertain_submission(tmp_path):
+    from aperture.alpaca_cli import AlpacaCliError
+    from aperture.loop import _close_trade
+    from aperture.warden import AuditLog, RiskWarden
+
+    short_sym = "SPY260918P00630000"
+    long_sym = "SPY260918P00625000"
+    md = FakeMarketData({
+        short_sym: Snapshot(
+            symbol=short_sym, bid=0.70, ask=0.80, quote_ts=NOW, open_interest=100
+        ),
+        long_sym: Snapshot(
+            symbol=long_sym, bid=0.20, ask=0.30, quote_ts=NOW, open_interest=100
+        ),
+    })
+
+    class TimeoutCLI:
+        def submit_mleg(self, proposal, client_order_id=None):
+            raise AlpacaCliError(["order", "submit"], 1, "request timed out")
+
+    state = DeskState(path=tmp_path / "desk.json")
+    state.record_open(trade())
+    warden = RiskWarden(audit=AuditLog(path=tmp_path / "audit.jsonl"))
+
+    assert not _close_trade(TimeoutCLI(), md, state, warden, state.open_trades["k1"], "test")
+    reserved = DeskState.load(state.path).open_trades["k1"]
+    assert reserved.status == "submitting_close"
+    assert reserved.close_client_order_id == "close-k1-1"
+    assert reserved.close_limit_price == pytest.approx(0.55)
 
 
 # --------------------------------------------------------------------------- #

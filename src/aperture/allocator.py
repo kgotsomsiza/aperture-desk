@@ -303,19 +303,38 @@ def observe(
         record_for(trade.strategy_id).open_positions += 1
 
     for closed in state.closed:
+        # Accepted, expired or externally-vanished orders are not outcomes.
+        # Only a broker-confirmed close with computed P&L is performance
+        # evidence for hiring and firing.
+        if closed.get("pnl") is None:
+            continue
         record = record_for(closed.get("strategy_id", "?"))
         record.closed += 1
         record.risk_deployed += float(closed.get("max_loss") or 0.0)
         pnl = closed.get("pnl")
-        if pnl is not None:
-            record.realized_pnl += float(pnl)
-            if float(pnl) > 0:
-                record.wins += 1
+        record.realized_pnl += float(pnl)
+        if float(pnl) > 0:
+            record.wins += 1
 
+    # The same economic proposal is often evaluated every five minutes while a
+    # quote remains wide.  Keep only its latest decision for the session; a
+    # sequence of eight identical vetoes is one miscalibrated idea, not a sample
+    # of eight independent ideas.
+    decisions: dict[tuple, dict] = {}
     for entry in audit.tail(limit=audit_limit):
         event = entry.get("event")
         if event not in ("approval", "veto"):
             continue
+        identity = entry.get("proposal_id") or (
+            str(entry.get("ts", ""))[:10],
+            entry.get("strategy", "?"),
+            entry.get("underlying", "?"),
+            tuple(entry.get("legs") or ()),
+        )
+        decisions[(entry.get("strategy", "?"), identity)] = entry
+
+    for entry in decisions.values():
+        event = entry.get("event")
         record = record_for(entry.get("strategy", "?"))
         record.proposals += 1
         if event == "veto":
