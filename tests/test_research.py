@@ -336,7 +336,7 @@ def test_simulator_counts_each_expiry_only_once_after_an_early_exit(monkeypatch)
         ):
             history.bars[build_occ("TEST", expiry, right, strike)] = {start: 1.0}
 
-    def picked(_history, expiry, _spot, _spec):
+    def picked(_history, expiry, _spot, _spec, *, day=None):
         return (
             build_occ("TEST", expiry, Right.PUT, 90),
             build_occ("TEST", expiry, Right.PUT, 95),
@@ -358,6 +358,39 @@ def test_simulator_counts_each_expiry_only_once_after_an_early_exit(monkeypatch)
     traded_expiries = [build_occ("TEST", expiry, Right.PUT, 90)[4:10] for expiry in expiries]
     assert result.n == 2
     assert [trade.legs[0][4:10] for trade in result.trades] == traded_expiries
+
+
+def test_simulator_selects_the_nearest_contracts_that_traded_that_day():
+    """An untraded exact strike must not hide a nearby observable structure."""
+    import aperture.backtest as backtest
+
+    today = date(2026, 1, 5)
+    expiry = date(2026, 1, 23)
+    history = OptionHistory(underlying="TEST", spot={today: 100.0})
+
+    # The exact 96/104 short targets are listed but have no bar. Nearby 95/105
+    # and their wings did trade, which mirrors a sparse historical option tape.
+    for strike, right, price in (
+        (93, Right.PUT, 0.15),
+        (95, Right.PUT, 0.85),
+        (96, Right.PUT, None),
+        (104, Right.CALL, None),
+        (105, Right.CALL, 0.90),
+        (107, Right.CALL, 0.20),
+    ):
+        symbol = build_occ("TEST", expiry, right, strike)
+        history.bars[symbol] = {} if price is None else {today: price}
+
+    legs = backtest._pick_condor(
+        history,
+        expiry,
+        100.0,
+        CondorSpec(short_pct=0.04, width_pct=0.02),
+        day=today,
+    )
+
+    assert legs is not None
+    assert [__import__("aperture.contracts", fromlist=["parse_occ"]).parse_occ(s).strike for s in legs] == [93, 95, 105, 107]
 
 
 def test_simulator_will_not_fake_settlement_beyond_a_slice(monkeypatch):
@@ -507,3 +540,85 @@ def test_target_expiries_spread_across_the_window():
     assert picked == sorted(picked)
     # Genuinely spread out, not six consecutive Fridays.
     assert (picked[-1] - picked[0]).days > 100
+
+
+def test_history_cache_key_changes_with_loader_version(monkeypatch):
+    import aperture.backtest as backtest
+
+    args = ("SPY", date(2025, 1, 1), date(2026, 1, 1), 0.08, 12, 140)
+    current = backtest._cache_key(*args)
+    monkeypatch.setattr(backtest, "HISTORY_CACHE_VERSION", 999)
+
+    assert backtest._cache_key(*args) != current
+
+
+def test_option_history_follows_every_page_and_merges_symbols():
+    from aperture.backtest import _all_option_bars
+
+    class PagedCLI:
+        def __init__(self):
+            self.tokens = []
+
+        def option_bars(self, symbols, start, page_token=None):
+            self.tokens.append(page_token)
+            if page_token is None:
+                return {
+                    "bars": {"CALL": [{"t": "2026-01-02T00:00:00Z", "c": 1.0}]},
+                    "next_page_token": "page-two",
+                }
+            return {
+                "bars": {
+                    "CALL": [{"t": "2026-01-03T00:00:00Z", "c": 0.9}],
+                    "PUT": [{"t": "2026-01-02T00:00:00Z", "c": 1.1}],
+                },
+                "next_page_token": None,
+            }
+
+    cli = PagedCLI()
+    merged = _all_option_bars(cli, ["CALL", "PUT"], start="2026-01-01")
+
+    assert cli.tokens == [None, "page-two"]
+    assert len(merged["CALL"]) == 2
+    assert len(merged["PUT"]) == 1
+
+
+def test_option_history_refuses_repeated_tokens_and_page_overflow():
+    from aperture.backtest import _all_option_bars
+
+    class RepeatingCLI:
+        def option_bars(self, symbols, start, page_token=None):
+            return {"bars": {}, "next_page_token": "same-token"}
+
+    with pytest.raises(RuntimeError, match="repeated"):
+        _all_option_bars(RepeatingCLI(), ["A"], start="2026-01-01")
+
+    class EndlessCLI:
+        def __init__(self):
+            self.page = 0
+
+        def option_bars(self, symbols, start, page_token=None):
+            self.page += 1
+            return {"bars": {}, "next_page_token": f"page-{self.page}"}
+
+    with pytest.raises(RuntimeError, match="safety bound"):
+        _all_option_bars(EndlessCLI(), ["A"], start="2026-01-01", max_pages=3)
+
+
+def test_alpaca_cli_forwards_the_option_bar_page_token(monkeypatch):
+    from aperture.alpaca_cli import AlpacaCLI
+
+    cli = AlpacaCLI.__new__(AlpacaCLI)
+    seen = []
+
+    def fake_run(*args):
+        seen.extend(args)
+        return {"bars": {}}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    cli.option_bars(
+        ["SPY260918C00700000"],
+        start="2026-08-01",
+        page_token="next-page",
+    )
+
+    assert seen[seen.index("--page-token") + 1] == "next-page"

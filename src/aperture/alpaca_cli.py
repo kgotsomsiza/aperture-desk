@@ -164,16 +164,31 @@ class AlpacaCLI:
         )
 
     def option_bars(
-        self, symbols: Sequence[str], start: str, *, timeframe: str = "1Day", limit: int = 1000
+        self,
+        symbols: Sequence[str],
+        start: str,
+        *,
+        timeframe: str = "1Day",
+        limit: int = 1000,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
-        """Historical option bars — the data the backtest gate promotes strategies on."""
-        return self.run(
+        """One historical option-bar page.
+
+        Alpaca's limit applies to total data points, not to each symbol.  A
+        multi-symbol response commonly ends midway through the call side of a
+        chain, so research callers must follow ``next_page_token`` until it is
+        absent rather than treating this page as a complete history.
+        """
+        args = [
             "data", "option", "bars",
             "--symbols", ",".join(symbols),
             "--start", start,
             "--timeframe", timeframe,
             "--limit", str(limit),
-        )
+        ]
+        if page_token is not None:
+            args += ["--page-token", page_token]
+        return self.run(*args)
 
     def stock_bars(
         self, symbol: str, start: str, *, timeframe: str = "1Day", limit: int = 1000

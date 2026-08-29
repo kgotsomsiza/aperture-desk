@@ -44,6 +44,7 @@ from .marketdata import _parse_ts
 log = logging.getLogger(__name__)
 
 CONTRACT_MULTIPLIER = 100
+HISTORY_CACHE_VERSION = 2
 
 
 @dataclass
@@ -221,7 +222,13 @@ def _target_expiries(start: date, end: date, count: int) -> list[date]:
 
 def _cache_key(underlying: str, start: date, end: date, moneyness: float,
                expiries: int, strikes_per_expiry: int) -> str:
-    raw = f"{underlying}|{start}|{end}|{moneyness}|{expiries}|{strikes_per_expiry}"
+    # The loader's semantics are part of the cache identity. Version 2 follows
+    # Alpaca's option-bar pagination; reusing a version-1 file would silently
+    # preserve the truncated chain that this loader is designed to prevent.
+    raw = (
+        f"v{HISTORY_CACHE_VERSION}|{underlying}|{start}|{end}|{moneyness}|"
+        f"{expiries}|{strikes_per_expiry}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -320,11 +327,11 @@ def load_history(
         bars_from = (expiry - timedelta(days=60)).isoformat()
         for chunk in (symbols[i:i + 100] for i in range(0, len(symbols), 100)):
             try:
-                bars = cli.option_bars(chunk, start=bars_from)
+                bars_by_symbol = _all_option_bars(cli, chunk, start=bars_from)
             except AlpacaCliError as exc:
                 log.warning("option bars failed: %s", exc.stderr[:100])
-                continue
-            for symbol, series in ((bars or {}).get("bars") or {}).items():
+                raise
+            for symbol, series in bars_by_symbol.items():
                 table = history.bars.setdefault(symbol, {})
                 for bar in series or []:
                     if bar.get("c"):
@@ -344,6 +351,40 @@ def load_history(
         len({parse_occ(s).expiry for s in history.bars}),
     )
     return history
+
+
+MAX_OPTION_BAR_PAGES = 100
+
+
+def _all_option_bars(
+    cli: AlpacaCLI,
+    symbols: Sequence[str],
+    *,
+    start: str,
+    max_pages: int = MAX_OPTION_BAR_PAGES,
+) -> dict[str, list[dict[str, Any]]]:
+    """Read every option-bar page or fail rather than backtest a half-chain."""
+    merged: dict[str, list[dict[str, Any]]] = {}
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+
+    for _ in range(max_pages):
+        payload = cli.option_bars(symbols, start=start, page_token=page_token) or {}
+        for symbol, series in (payload.get("bars") or {}).items():
+            merged.setdefault(symbol, []).extend(series or [])
+
+        next_token = payload.get("next_page_token")
+        if not next_token:
+            return merged
+        next_token = str(next_token)
+        if next_token in seen_tokens:
+            raise RuntimeError("Alpaca option-bar pagination repeated a page token")
+        seen_tokens.add(next_token)
+        page_token = next_token
+
+    raise RuntimeError(
+        f"Alpaca option-bar history exceeded the {max_pages}-page safety bound"
+    )
 
 
 def _bars(payload: dict[str, Any] | None, symbol: str) -> list[dict[str, Any]]:
