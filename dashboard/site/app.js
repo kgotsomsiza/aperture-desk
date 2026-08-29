@@ -380,7 +380,7 @@ function decisionText(decision) {
       if (decision.objection) return `Red team: ${decision.objection}${severity}`;
       break;
     }
-    case "posture":
+    case "regime":
       if (decision.posture) {
         const stance = String(decision.posture).replaceAll("_", " ");
         return decision.reason ? `Posture: ${stance} — ${decision.reason}` : `Posture: ${stance}`;
@@ -397,6 +397,47 @@ function decisionText(decision) {
         return `${decision.unchallenged} proposal(s) went unchallenged: red team budget spent`;
       }
       break;
+    case "execution_adapted": {
+      const settled = (decision.filled || 0) + (decision.unfilled || 0);
+      if (settled > 0) {
+        const rate = Math.round(((decision.filled || 0) / settled) * 100);
+        const level = typeof decision.aggression === "number"
+          ? `, conceding ${decision.aggression.toFixed(2)} of the spread`
+          : "";
+        return `Fills ${decision.filled}/${settled} (${rate}%)${level}`;
+      }
+      break;
+    }
+    case "allocation":
+      if (decision.weights && typeof decision.weights === "object") {
+        const parts = Object.entries(decision.weights)
+          .map(([name, w]) => `${name} ${Math.round(Number(w) * 100)}%`);
+        if (parts.length) return `Capital now ${parts.join(" · ")}`;
+      }
+      break;
+    case "breach":
+      if (decision.reason) {
+        const at = typeof decision.equity === "number"
+          ? ` at $${Math.round(decision.equity).toLocaleString()}`
+          : "";
+        return `Circuit breaker: ${decision.reason}${at}`;
+      }
+      break;
+    case "hired":
+      if (decision.hypothesis) return `Hired on probation: ${decision.hypothesis}`;
+      if (decision.mutation) return `Hired on probation: ${decision.mutation}`;
+      break;
+    case "research_complete": {
+      const tested = decision.tested;
+      const promoted = decision.promoted;
+      if (tested !== undefined) {
+        const n = Array.isArray(promoted) ? promoted.length : (promoted || 0);
+        return n
+          ? `Lab tested ${tested} candidates and promoted ${n}`
+          : `Lab tested ${tested} candidates; none cleared the gate`;
+      }
+      break;
+    }
     default:
       break;
   }

@@ -187,20 +187,35 @@ npm test
 npm run check
 ```
 
-The current suite contains 288 Python tests and 6 Worker-runtime tests.
+The current suite contains 302 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 
 ```text
 src/aperture/
-  strategies/       founding and research-hired strategy implementations
+  strategies/        founding and research-hired strategy implementations
+  agents.py          the four agents: scout, regime, red team, portfolio manager
+  mcp_research.py    market and news research over Alpaca's MCP server
+  llm.py             provider abstraction, tiers, and deterministic fallback
   risk.py            pure payoff analysis and entry gates
   warden.py          veto, audit, kill-switch, and flatten authority
   loop.py            reconciled, idempotent trading cycle
+  runner.py          the long-running process and its cadence
+  execution.py       learns how hard to push for a fill
+  marketdata.py      chains, quotes, bars, and realised volatility
+  alpaca_cli.py      the official CLI wrapper: the only path to an order
+  contracts.py       OCC symbols, sides, and position intent
+  earnings.py        event calendar with report-timing awareness
+  identity.py        guards against trading the wrong account
   research.py        candidate selection and promotion gate
   backtest.py        held-out historical options simulator
   allocator.py       evidence-weighted funding and firing
   snapshot.py        public-safe projection and authenticated transport
+  letter.py          the daily letter; numbers in Python, narration by model
+  status.py          plain-English operator view
+  state.py           the ledger and its per-account audit trail
+  preflight.py       pre-session checks
+  consistency.py     fails the suite when a change was not carried through
 dashboard/
   src/index.ts       Worker API and snapshot validation
   site/              zero-framework public evidence surface

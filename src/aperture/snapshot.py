@@ -47,8 +47,12 @@ POSITION_FIELDS = (
 # identity -- the forbidden-key sweep still runs over the finished snapshot.
 AUDIT_FIELDS = (
     "ts", "event", "strategy", "underlying", "summary", "rationale", "reason",
+    # what the agents decided, and on what grounds
     "symbols", "reasons", "posture", "confidence", "objection", "severity",
     "source", "unchallenged",
+    # the desk reasoning about itself: fills, capital, research
+    "aggression", "filled", "unfilled", "weights", "equity",
+    "hypothesis", "mutation", "tested", "promoted",
 )
 PUBLIC_MODES = {"demo", "practice", "scoring", "final"}
 
