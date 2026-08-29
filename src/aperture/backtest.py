@@ -62,6 +62,9 @@ class OptionHistory:
     underlying: str
     spot: dict[date, float] = field(default_factory=dict)
     bars: dict[str, dict[date, float]] = field(default_factory=dict)
+    _contracts_index: dict[tuple[date, Right], list[str]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def price(self, symbol: str, day: date) -> float | None:
         return self.bars.get(symbol, {}).get(day)
@@ -70,15 +73,21 @@ class OptionHistory:
         return sorted(self.spot)
 
     def contracts_for(self, expiry: date, right: Right) -> list[str]:
-        out = []
-        for symbol in self.bars:
-            try:
-                parsed = parse_occ(symbol)
-            except ValueError:
-                continue
-            if parsed.expiry == expiry and parsed.right is right:
-                out.append(symbol)
-        return sorted(out, key=lambda s: parse_occ(s).strike)
+        # Simulation asks this twice per session and once per candidate. Build
+        # the immutable catalogue index once instead of reparsing every OCC
+        # symbol hundreds of millions of times during a full-window sweep.
+        if not self._contracts_index and self.bars:
+            for symbol in self.bars:
+                try:
+                    parsed = parse_occ(symbol)
+                except ValueError:
+                    continue
+                self._contracts_index.setdefault((parsed.expiry, parsed.right), []).append(
+                    symbol
+                )
+            for symbols in self._contracts_index.values():
+                symbols.sort(key=lambda value: parse_occ(value).strike)
+        return self._contracts_index.get((expiry, right), [])
 
     def between(self, start: date | None = None, end: date | None = None) -> "OptionHistory":
         """Chronological slice used to keep selection and validation separate."""

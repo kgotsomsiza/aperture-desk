@@ -285,6 +285,33 @@ def test_simulator_produces_trades_on_a_workable_history():
     assert result.total_pnl > 0
 
 
+def test_contract_catalogue_is_indexed_once_after_history_is_loaded(monkeypatch):
+    import aperture.backtest as backtest
+
+    expiry = date(2026, 2, 20)
+    history = OptionHistory(
+        underlying="TEST",
+        bars={
+            build_occ("TEST", expiry, Right.PUT, 95): {},
+            build_occ("TEST", expiry, Right.CALL, 105): {},
+        },
+    )
+    original = backtest.parse_occ
+    calls = 0
+
+    def counted(symbol):
+        nonlocal calls
+        calls += 1
+        return original(symbol)
+
+    monkeypatch.setattr(backtest, "parse_occ", counted)
+    assert len(history.contracts_for(expiry, Right.PUT)) == 1
+    first_pass = calls
+    assert len(history.contracts_for(expiry, Right.CALL)) == 1
+
+    assert calls == first_pass
+
+
 def test_simulator_explains_when_the_daily_tape_cannot_form_both_sides():
     start = date(2026, 1, 5)
     expiry = date(2026, 1, 23)
