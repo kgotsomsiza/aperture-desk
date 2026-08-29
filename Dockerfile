@@ -1,7 +1,13 @@
 # The desk needs both runtimes: the Alpaca CLI is a Go binary and is the
 # execution spine, while the strategies and risk engine are Python.
-FROM golang:1.23-bookworm AS cli
-RUN go install github.com/alpacahq/cli/cmd/alpaca@latest
+FROM golang:1.24-bookworm AS cli
+# Pinned, not @latest. The desk's whole execution path was verified against
+# v0.0.13 -- the mleg --legs serialisation, the singular/plural --symbol
+# inconsistency, the exit codes. An unpinned build silently picked up
+# v0.0.14 mid-project and failed on a Go version bump; had it built, the
+# container would have been running a CLI nothing was tested against.
+ARG ALPACA_CLI_VERSION=v0.0.13
+RUN go install github.com/alpacahq/cli/cmd/alpaca@${ALPACA_CLI_VERSION}
 
 FROM python:3.12-slim-bookworm
 COPY --from=cli /go/bin/alpaca /usr/local/bin/alpaca
