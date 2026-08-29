@@ -27,11 +27,14 @@ promotion gate in ``research.py`` is calibrated with that in mind.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import pickle
 import statistics
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Sequence
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
@@ -216,6 +219,12 @@ def _target_expiries(start: date, end: date, count: int) -> list[date]:
     return fridays[::step][:count]
 
 
+def _cache_key(underlying: str, start: date, end: date, moneyness: float,
+               expiries: int, strikes_per_expiry: int) -> str:
+    raw = f"{underlying}|{start}|{end}|{moneyness}|{expiries}|{strikes_per_expiry}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def load_history(
     cli: AlpacaCLI,
     underlying: str,
@@ -225,6 +234,7 @@ def load_history(
     moneyness: float = 0.08,
     expiries: int = 10,
     strikes_per_expiry: int = 200,
+    cache_dir: Path | str | None = "state/history",
 ) -> OptionHistory:
     """Fetch underlying and option daily bars for a window.
 
@@ -237,7 +247,26 @@ def load_history(
     fifteen percent of spot -- comfortably wider than the four-percent shorts and
     their wings. Too few and the short strikes simply are not in the loaded set,
     which looks exactly like a strategy that never finds a trade.
+
+    The fetch is thousands of API calls and takes minutes, while the window it
+    describes is entirely in the past and cannot change. It is cached on disk so
+    an interrupted sweep does not pay for the same history twice.
     """
+    cache_path = None
+    if cache_dir is not None:
+        key = _cache_key(underlying, start, end, moneyness, expiries, strikes_per_expiry)
+        cache_path = Path(cache_dir) / f"{underlying}-{key}.pkl"
+        if cache_path.exists():
+            try:
+                history = pickle.loads(cache_path.read_bytes())
+                log.info(
+                    "reusing cached history: %d sessions, %d contracts (%s)",
+                    len(history.spot), len(history.bars), cache_path.name,
+                )
+                return history
+            except Exception as exc:  # noqa: BLE001 - a bad cache is never fatal
+                log.warning("cached history unreadable, refetching: %s", exc)
+
     history = OptionHistory(underlying=underlying)
 
     for bar in _bars(cli.stock_bars(underlying, start=start.isoformat()), underlying):
@@ -300,6 +329,13 @@ def load_history(
                 for bar in series or []:
                     if bar.get("c"):
                         table[_parse_ts(bar.get("t")).date()] = float(bar["c"])
+
+    if cache_path is not None and history.bars:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".tmp")
+        tmp.write_bytes(pickle.dumps(history))
+        tmp.replace(cache_path)
+        log.info("history cached to %s", cache_path)
 
     dense = sum(1 for t in history.bars.values() if len(t) >= 10)
     log.info(
@@ -377,7 +413,7 @@ def simulate_condors(
         if expiry is None:
             continue
 
-        legs = _pick_condor(history, expiry, spot, spec)
+        legs = _pick_condor(history, expiry, spot, spec, day=today)
         if legs is None:
             continue
 
@@ -425,10 +461,24 @@ def _nearest_expiry(expiries: Sequence[date], today: date, target: int) -> date 
 
 
 def _pick_condor(
-    history: OptionHistory, expiry: date, spot: float, spec: CondorSpec
+    history: OptionHistory,
+    expiry: date,
+    spot: float,
+    spec: CondorSpec,
+    *,
+    day: date | None = None,
 ) -> tuple[str, ...] | None:
     puts = history.contracts_for(expiry, Right.PUT)
     calls = history.contracts_for(expiry, Right.CALL)
+    # The expired-contract catalogue includes every listed strike, including
+    # contracts that did not trade on the candidate entry session.  Selecting
+    # the mathematically nearest strike from that full catalogue and then giving
+    # up when it has no bar discards a perfectly observable nearby structure.
+    # Live CARRY selects from priceable snapshots; the historical analogue is to
+    # select from contracts that actually printed a bar that day.
+    if day is not None:
+        puts = [symbol for symbol in puts if history.price(symbol, day) is not None]
+        calls = [symbol for symbol in calls if history.price(symbol, day) is not None]
     if len(puts) < 2 or len(calls) < 2:
         return None
 
