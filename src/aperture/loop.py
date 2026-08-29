@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,8 @@ from .allocator import Allocator, observe, summarise
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side, parse_occ
 from .agents import (
-    apply_kill_budget, call_regime, choose_universe, rank_proposals, red_team,
+    RedTeamVerdict, apply_kill_budget, call_regime, choose_universe,
+    rank_proposals, red_team,
 )
 from .earnings import EarningsCalendar
 from .execution import adapt, clamp, measure_fills
@@ -51,6 +53,12 @@ from .warden import AuditLog, RiskWarden
 
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger("aperture")
+
+# The red team costs one model call per proposal, so it is the only agent
+# whose cost grows with how busy the session is. Past this budget the rest
+# of the cycle's proposals go unchallenged -- the same direction this agent
+# already fails in, since it can only ever remove a trade.
+RED_TEAM_BUDGET_SECONDS = 90.0
 
 # Official timeline, per Alpaca's published guidelines.
 #
@@ -337,15 +345,28 @@ def run_cycle(
         # The red team argues against each proposal before capital is
         # committed. It can only ever remove a trade, so a confused answer
         # costs an opportunity rather than creating a position.
-        verdicts = [
-            red_team(agent, proposal.rationale, {
+        # The red team is the one agent whose cost scales with the size of the
+        # cycle -- one call per proposal. A busy session must not spend its
+        # whole interval arguing, so the phase gets a wall-clock budget. Past
+        # it, remaining proposals go unchallenged, which is the same direction
+        # this agent already fails in: it can only ever remove a trade.
+        verdicts = []
+        rt_deadline = time.monotonic() + RED_TEAM_BUDGET_SECONDS
+        for proposal in proposals:
+            if time.monotonic() >= rt_deadline:
+                verdicts.append(RedTeamVerdict(
+                    False, "not challenged: red team budget spent", 0.0, "budget"))
+                continue
+            verdicts.append(red_team(agent, proposal.rationale, {
                 "underlying": proposal.underlying,
                 "structure_legs": len(proposal.legs),
                 "net_price": proposal.net_price,
                 "posture_today": regime.posture,
-            })
-            for proposal in proposals
-        ]
+            }))
+        unchallenged = sum(1 for v in verdicts if v.decided_by == "budget")
+        if unchallenged:
+            log.warning("red team budget spent; %d proposal(s) unchallenged", unchallenged)
+            warden.audit.record("red_team_budget_spent", unchallenged=unchallenged)
         # Bounded: however strongly it objects, one agent may veto at most half
         # of a cycle. Observed live killing 100% of proposals, textbook condors
         # included -- and a desk that never trades looks exactly like a desk

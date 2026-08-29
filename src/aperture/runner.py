@@ -86,9 +86,18 @@ class Runner:
                 self.publish()
                 return 0
 
+            started = time.monotonic()
             slept = self.tick()
             if self.stopping:
                 break
+            # --interval means "a decision every N seconds", not "N seconds of
+            # idling after however long the work took". A cycle costs about two
+            # minutes, so sleeping the full interval on top of it stretched the
+            # real cadence to seven minutes and cost a third of the session's
+            # decision points. Backoffs and until-open waits are left alone --
+            # those are computed at the end of the cycle and are already correct.
+            if slept == self.args.interval:
+                slept = max(1, int(slept - (time.monotonic() - started)))
             self.sleep(slept)
 
         self.publish()

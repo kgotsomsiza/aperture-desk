@@ -144,3 +144,19 @@ def test_clamp_guards_anything_restored_from_disk():
     assert clamp(9.9) == MAX_AGGRESSION
     assert clamp(-3.0) == MIN_AGGRESSION
     assert clamp(0.75) == 0.75
+
+
+# --------------------------------------------------------------------------- #
+# Cycle timing: the interval is a cadence, not an idle period
+# --------------------------------------------------------------------------- #
+
+
+def test_a_long_cycle_eats_into_its_own_interval():
+    """A two-minute cycle plus a full five-minute sleep is a seven-minute
+    cadence, which costs a third of the session's decision points."""
+    interval, work = 300, 120
+    assert max(1, int(interval - work)) == 180
+
+
+def test_a_cycle_longer_than_the_interval_still_yields_a_positive_sleep():
+    assert max(1, int(300 - 900)) == 1

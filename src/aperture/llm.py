@@ -112,7 +112,9 @@ class OpenAICompatibleProvider:
     reasoning_model: str = "gpt-5.4"
     json_mode: str = JSON_SCHEMA
     budget: TokenBudget = field(default_factory=TokenBudget)
-    timeout: float = 90.0
+    # Measured medians are 4-8s. 90s was ten times the tail and, with the
+    # reasoning tier's fallback, let one call cost three minutes.
+    timeout: float = float(os.environ.get("APERTURE_LLM_TIMEOUT", "30"))
     key_env: str = "OPENAI_API_KEY"
     label: str = "openai"
     max_attempts: int = 3
