@@ -366,6 +366,43 @@ function renderAttribution(data) {
   byId("attribution-empty").hidden = rows.length > 0;
 }
 
+// What an agent decided is more interesting than the fact that it decided.
+// Each agent event has its own most-informative field: the red team's objection,
+// the scout's picks, the regime's posture. Falls back to the generic fields so
+// an event this function has never seen still renders something true.
+function decisionText(decision) {
+  const list = (value) => (Array.isArray(value) ? value.join(", ") : value);
+  switch (decision.event) {
+    case "red_team_kill": {
+      const severity = typeof decision.severity === "number"
+        ? ` (severity ${decision.severity.toFixed(2)})`
+        : "";
+      if (decision.objection) return `Red team: ${decision.objection}${severity}`;
+      break;
+    }
+    case "posture":
+      if (decision.posture) {
+        const stance = String(decision.posture).replaceAll("_", " ");
+        return decision.reason ? `Posture: ${stance} — ${decision.reason}` : `Posture: ${stance}`;
+      }
+      break;
+    case "universe":
+      if (decision.symbols) return `Scout chose ${list(decision.symbols)}`;
+      break;
+    case "mcp_research":
+      if (decision.symbols) return `Researched ${list(decision.symbols)} via ${decision.source || "MCP"}`;
+      break;
+    case "red_team_budget_spent":
+      if (decision.unchallenged) {
+        return `${decision.unchallenged} proposal(s) went unchallenged: red team budget spent`;
+      }
+      break;
+    default:
+      break;
+  }
+  return decision.summary || decision.rationale || decision.reason || "Decision recorded.";
+}
+
 function eventKind(event) {
   const value = String(event || "event").toLowerCase();
   if (value.includes("veto") || value.includes("error") || value.includes("kill")) return "veto";
@@ -393,7 +430,7 @@ function renderDecisions(data) {
     const title = document.createElement("b");
     title.textContent = [decision.strategy, decision.underlying].filter(Boolean).join(" · ") || "DESK";
     const summary = document.createElement("span");
-    summary.textContent = decision.summary || decision.rationale || decision.reason || "Decision recorded.";
+    summary.textContent = decisionText(decision);
     copy.append(title, summary);
     item.append(time, tag, copy);
     tape.append(item);
