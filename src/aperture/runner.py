@@ -201,9 +201,6 @@ class Runner:
                 candidates=int(os.environ.get("APERTURE_RESEARCH_CANDIDATES", "8")),
                 lookback_days=int(os.environ.get("APERTURE_RESEARCH_LOOKBACK", "900")),
                 expiries=int(os.environ.get("APERTURE_RESEARCH_EXPIRIES", "120")),
-                strikes_per_expiry=int(
-                    os.environ.get("APERTURE_RESEARCH_STRIKES_PER_EXPIRY", "140")
-                ),
                 provider=self.provider,
                 seed=int(session.replace("-", "")),
                 prior_trials=state.research_trials,

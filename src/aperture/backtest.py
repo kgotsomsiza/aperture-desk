@@ -44,7 +44,9 @@ from .marketdata import _parse_ts
 log = logging.getLogger(__name__)
 
 CONTRACT_MULTIPLIER = 100
-HISTORY_CACHE_VERSION = 2
+HISTORY_CACHE_VERSION = 3
+HISTORY_MIN_STRIKE_BAND = 0.12
+HISTORY_STRIKE_BUFFER = 0.04
 
 
 @dataclass
@@ -181,25 +183,6 @@ class BacktestResult:
 # --------------------------------------------------------------------------- #
 
 
-def _nearest_strikes(symbols: Sequence[str], anchor: float, count: int) -> list[str]:
-    """The ``count`` contracts closest to ``anchor``, not the first ``count``.
-
-    Every Alpaca listing endpoint returns an ordered page, and every naive head
-    slice of one silently yields a biased subset: contracts sorted by strike give
-    the lowest strikes, sorted by symbol give only calls, sorted by expiry give a
-    single date. All three of those bugs were written here before this helper
-    existed. Select around the value you care about instead of trusting the order.
-    """
-    parsed = []
-    for symbol in symbols:
-        try:
-            parsed.append((abs(parse_occ(symbol).strike - anchor), symbol))
-        except ValueError:
-            continue
-    parsed.sort()
-    return [symbol for _, symbol in parsed[:count]]
-
-
 def _target_expiries(start: date, end: date, count: int) -> list[date]:
     """Fridays spread evenly across the window.
 
@@ -220,14 +203,62 @@ def _target_expiries(start: date, end: date, count: int) -> list[date]:
     return fridays[::step][:count]
 
 
-def _cache_key(underlying: str, start: date, end: date, moneyness: float,
-               expiries: int, strikes_per_expiry: int) -> str:
+def _universe_signature(specs: Sequence["CondorSpec"]) -> str:
+    rows = sorted({
+        (
+            float(spec.short_pct),
+            float(spec.width_pct),
+            int(spec.dte_target),
+        )
+        for spec in specs
+    })
+    return ";".join(f"{short:.6f},{width:.6f},{dte}" for short, width, dte in rows)
+
+
+def _strike_window(
+    spot: dict[date, float],
+    expiry: date,
+    specs: Sequence["CondorSpec"],
+) -> tuple[float, float] | None:
+    """Exact historical catalogue window needed by the selected strategies.
+
+    The live hired strategy requests at least a twelve-percent band around spot.
+    History mirrors that rule over every session on which any selected spec could
+    enter. This makes candidate geometry observable without relying on a magic
+    number of strikes or on spot from one arbitrary anchor session.
+    """
+    lows: list[float] = []
+    highs: list[float] = []
+    for spec in specs:
+        strike_band = max(
+            float(spec.short_pct) + float(spec.width_pct) + HISTORY_STRIKE_BUFFER,
+            HISTORY_MIN_STRIKE_BAND,
+        )
+        max_dte = int(spec.dte_target) + 14
+        for day, price in spot.items():
+            dte = (expiry - day).days
+            if 5 <= dte <= max_dte:
+                lows.append(price * (1 - strike_band))
+                highs.append(price * (1 + strike_band))
+    if not lows:
+        return None
+    # Round outwards: a catalogue bound must never trim the boundary strike.
+    return math.floor(min(lows) * 100) / 100, math.ceil(max(highs) * 100) / 100
+
+
+def _cache_key(
+    underlying: str,
+    start: date,
+    end: date,
+    expiries: int,
+    universe_signature: str,
+) -> str:
     # The loader's semantics are part of the cache identity. Version 2 follows
     # Alpaca's option-bar pagination; reusing a version-1 file would silently
     # preserve the truncated chain that this loader is designed to prevent.
     raw = (
-        f"v{HISTORY_CACHE_VERSION}|{underlying}|{start}|{end}|{moneyness}|"
-        f"{expiries}|{strikes_per_expiry}"
+        f"v{HISTORY_CACHE_VERSION}|{underlying}|{start}|{end}|{expiries}|"
+        f"{universe_signature}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -238,9 +269,8 @@ def load_history(
     *,
     start: date,
     end: date,
-    moneyness: float = 0.08,
     expiries: int = 10,
-    strikes_per_expiry: int = 200,
+    universe_specs: Sequence["CondorSpec"] | None = None,
     cache_dir: Path | str | None = "state/history",
 ) -> OptionHistory:
     """Fetch underlying and option daily bars for a window.
@@ -249,19 +279,21 @@ def load_history(
     across its whole life, which is what a walk-forward simulation needs. Only
     resolved windows work: contract discovery uses the expired listing.
 
-    ``strikes_per_expiry`` has to span the whole structure, not just the money.
-    SPY strikes are a dollar apart near the money, so a hundred per side is about
-    fifteen percent of spot -- comfortably wider than the four-percent shorts and
-    their wings. Too few and the short strikes simply are not in the loaded set,
-    which looks exactly like a strategy that never finds a trade.
+    The contract universe is derived from the selected strategy geometries and
+    every actual spot session on which they could enter. It mirrors the live
+    strategy's strike-band rule, and retains every listed contract in that band;
+    a strategy is never rejected merely because an arbitrary strike count hid
+    its wings.
 
     The fetch is thousands of API calls and takes minutes, while the window it
     describes is entirely in the past and cannot change. It is cached on disk so
     an interrupted sweep does not pay for the same history twice.
     """
+    specs = list(universe_specs or [CondorSpec()])
+    universe_signature = _universe_signature(specs)
     cache_path = None
     if cache_dir is not None:
-        key = _cache_key(underlying, start, end, moneyness, expiries, strikes_per_expiry)
+        key = _cache_key(underlying, start, end, expiries, universe_signature)
         cache_path = Path(cache_dir) / f"{underlying}-{key}.pkl"
         if cache_path.exists():
             try:
@@ -287,12 +319,10 @@ def load_history(
 
     sessions = history.sessions()
     for expiry in _target_expiries(start, end, expiries):
-        # Anchor the strike band to where the underlying actually was a few weeks
-        # before this expiry, not to the window's average.
-        anchor_day = max((d for d in sessions if d <= expiry - timedelta(days=21)), default=None)
-        if anchor_day is None:
+        strike_window = _strike_window(history.spot, expiry, specs)
+        if strike_window is None:
             continue
-        anchor = history.spot[anchor_day]
+        strike_low, strike_high = strike_window
 
         # Calls and puts are requested separately. The listing is ordered by
         # symbol, so "C" sorts ahead of "P" and any head-slice of a combined
@@ -305,8 +335,8 @@ def load_history(
                     "option", "contracts",
                     "--underlying-symbols", underlying,
                     "--expiration-date", expiry.isoformat(),
-                    "--strike-price-gte", str(round(anchor * (1 - moneyness), 2)),
-                    "--strike-price-lte", str(round(anchor * (1 + moneyness), 2)),
+                    "--strike-price-gte", f"{strike_low:.2f}",
+                    "--strike-price-lte", f"{strike_high:.2f}",
                     "--type", option_type,
                     "--status", "inactive",
                     "--limit", "10000",
@@ -319,7 +349,7 @@ def load_history(
                 for c in (payload or {}).get("option_contracts") or []
                 if c.get("symbol")
             ]
-            symbols.extend(_nearest_strikes(found, anchor, strikes_per_expiry // 2))
+            symbols.extend(found)
 
         if not symbols:
             continue

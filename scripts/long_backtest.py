@@ -32,7 +32,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidates", type=int, default=18)
     parser.add_argument("--lookback", type=int, default=900)
     parser.add_argument("--expiries", type=int, default=120)
-    parser.add_argument("--strikes-per-expiry", type=int, default=140)
     parser.add_argument("--seed", type=int, default=20260828)
     parser.add_argument("--prior-trials", type=int, default=0)
     parser.add_argument("--out", default="state/long_backtest.json")
@@ -45,7 +44,6 @@ def main(argv: list[str] | None = None) -> int:
         candidates=args.candidates,
         lookback_days=args.lookback,
         expiries=args.expiries,
-        strikes_per_expiry=args.strikes_per_expiry,
         provider=provider,
         seed=args.seed,
         asof=date.today(),

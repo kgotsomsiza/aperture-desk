@@ -359,7 +359,6 @@ def run_lab(
     candidates: int = 8,
     lookback_days: int = 300,
     expiries: int = 40,
-    strikes_per_expiry: int = 120,
     gate: PromotionGate | None = None,
     provider: LLMProvider | None = None,
     seed: int | None = None,
@@ -384,9 +383,15 @@ def run_lab(
     # Stop short of today: contracts must have expired to be listed and priced.
     end = asof - timedelta(days=30)
 
+    # Select hypotheses before loading option history so the loader can derive a
+    # complete contract universe for exactly those geometries. The model still
+    # sees no outcomes; it only prioritises the predeclared candidate family.
+    field_ = hypothesize(provider, baseline, candidates, rng)
+
     history = load_history(
         cli, underlying, start=start, end=end,
-        expiries=expiries, strikes_per_expiry=strikes_per_expiry,
+        expiries=expiries,
+        universe_specs=[baseline, *(candidate.spec for candidate in field_)],
     )
     report = LabReport()
     if not history.bars:
@@ -416,7 +421,6 @@ def run_lab(
     )
     log.info("incumbent: %s", report.incumbent.summary())
 
-    field_ = hypothesize(provider, baseline, candidates, rng)
     report.tested = len(field_)
     report.multiple_testing_trials = max(prior_trials, 0) + report.tested
 

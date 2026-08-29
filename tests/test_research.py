@@ -455,6 +455,7 @@ def test_lab_requires_the_selected_candidate_to_survive_a_separate_holdout(monke
         "reduce tail loss",
     )
     tried = []
+    loaded_specs = []
 
     class Gate:
         def evaluate(self, result, incumbent, candidates_tried):
@@ -463,7 +464,11 @@ def test_lab_requires_the_selected_candidate_to_survive_a_separate_holdout(monke
                 return False, "failed unseen history"
             return True, "passed selection"
 
-    monkeypatch.setattr(research, "load_history", lambda *args, **kwargs: history)
+    def fake_load_history(*args, **kwargs):
+        loaded_specs.extend(kwargs["universe_specs"])
+        return history
+
+    monkeypatch.setattr(research, "load_history", fake_load_history)
     monkeypatch.setattr(
         research, "hypothesize", lambda provider, spec, count, rng: [candidate]
     )
@@ -482,6 +487,7 @@ def test_lab_requires_the_selected_candidate_to_survive_a_separate_holdout(monke
     assert report.rejected[0][2] == "holdout: failed unseen history"
     assert report.multiple_testing_trials == 12
     assert tried == [12, 12]
+    assert candidate.spec in loaded_specs
     training_end = date.fromisoformat(report.training_window[1])
     validation_start = date.fromisoformat(report.validation_window[0])
     assert (validation_start - training_end).days >= 35
@@ -509,26 +515,85 @@ def test_promotion_record_is_stable_and_carries_holdout_evidence():
 
 
 # --------------------------------------------------------------------------- #
-# Listing order: the bug class that appeared four times
+# Historical-universe completeness
 # --------------------------------------------------------------------------- #
 
 
-def test_strike_selection_centres_on_the_anchor_not_the_head_of_the_list():
-    """Alpaca listings come back ordered. A head slice of a strike-sorted page
-    returns only the lowest strikes -- far OTM contracts that never traded and
-    therefore have no bars -- so the chain looks empty where it matters."""
-    from aperture.backtest import _nearest_strikes
+def test_full_candidate_pool_drives_the_required_geometry():
+    specs = [CondorSpec(), *(candidate.spec for candidate in mutation_pool(CondorSpec()))]
+
+    assert max(spec.short_pct + spec.width_pct for spec in specs) == pytest.approx(0.065)
+    assert max(spec.dte_target + 14 for spec in specs) == 35
+
+
+def test_strike_window_tracks_actual_eligible_spot_not_one_anchor():
+    from aperture.backtest import _strike_window
 
     expiry = date(2026, 2, 20)
-    symbols = [build_occ("SPY", expiry, Right.CALL, k) for k in range(600, 760, 5)]
-    picked = _nearest_strikes(symbols, anchor=690.0, count=6)
-    strikes = sorted(build_occ and __import__(
-        "aperture.contracts", fromlist=["parse_occ"]).parse_occ(s).strike for s in picked)
+    spot = {
+        expiry - timedelta(days=40): 100.0,  # outside every entry window
+        expiry - timedelta(days=20): 105.0,
+    }
+    specs = [CondorSpec(), *(candidate.spec for candidate in mutation_pool(CondorSpec()))]
 
-    assert len(picked) == 6
-    assert min(strikes) < 690.0 < max(strikes)      # brackets the anchor
-    assert all(abs(k - 690.0) <= 20 for k in strikes)
-    assert 600.0 not in strikes                      # not the head of the list
+    low, high = _strike_window(spot, expiry, specs)
+
+    # Mirrors the live strategy's minimum ±12% catalogue band around the spot
+    # that was actually eligible for an entry.
+    assert low <= 105.0 * 0.88
+    assert high == pytest.approx(105.0 * 1.12)
+
+
+def test_history_loader_keeps_every_contract_in_the_derived_band(monkeypatch):
+    import aperture.backtest as backtest
+
+    expiry = date(2026, 2, 20)
+    entry_day = expiry - timedelta(days=20)
+
+    class CompleteCLI:
+        def __init__(self):
+            self.requested_symbols = []
+            self.bounds = []
+
+        def stock_bars(self, symbol, start):
+            return {"bars": {symbol: [{"t": f"{entry_day}T00:00:00Z", "c": 105.0}]}}
+
+        def run(self, *args):
+            option_type = args[args.index("--type") + 1]
+            self.bounds.append((
+                float(args[args.index("--strike-price-gte") + 1]),
+                float(args[args.index("--strike-price-lte") + 1]),
+            ))
+            right = Right.CALL if option_type == "call" else Right.PUT
+            return {
+                "option_contracts": [
+                    {"symbol": build_occ("SPY", expiry, right, strike)}
+                    for strike in range(500, 660)
+                ]
+            }
+
+        def option_bars(self, symbols, start, page_token=None):
+            self.requested_symbols.extend(symbols)
+            return {"bars": {}, "next_page_token": None}
+
+    cli = CompleteCLI()
+    monkeypatch.setattr(backtest, "_target_expiries", lambda *args: [expiry])
+    backtest.load_history(
+        cli,
+        "SPY",
+        start=entry_day,
+        end=expiry,
+        expiries=1,
+        universe_specs=[CondorSpec()],
+        cache_dir=None,
+    )
+
+    assert len(cli.requested_symbols) == 320
+    assert len(set(cli.requested_symbols)) == 320
+    assert all(
+        low <= 105.0 * 0.88 and high == pytest.approx(105.0 * 1.12)
+        for low, high in cli.bounds
+    )
 
 
 def test_target_expiries_spread_across_the_window():
@@ -545,8 +610,13 @@ def test_target_expiries_spread_across_the_window():
 def test_history_cache_key_changes_with_loader_version(monkeypatch):
     import aperture.backtest as backtest
 
-    args = ("SPY", date(2025, 1, 1), date(2026, 1, 1), 0.08, 12, 140)
+    base_signature = backtest._universe_signature([CondorSpec()])
+    args = ("SPY", date(2025, 1, 1), date(2026, 1, 1), 12, base_signature)
     current = backtest._cache_key(*args)
+    wider = backtest._universe_signature([CondorSpec(), CondorSpec(short_pct=0.055)])
+
+    assert backtest._cache_key(*args[:-1], wider) != current
+
     monkeypatch.setattr(backtest, "HISTORY_CACHE_VERSION", 999)
 
     assert backtest._cache_key(*args) != current
