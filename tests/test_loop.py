@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -950,3 +951,40 @@ def test_tournament_clock_still_leans_in_early_in_the_window():
     from aperture.risk import tournament_risk_multiplier
 
     assert tournament_risk_multiplier(SCORING_OPEN, SCORING_CLOSE, 100_000, 100_000) > 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Audit trails belong to the ledger they describe
+# --------------------------------------------------------------------------- #
+
+
+def test_each_ledger_gets_its_own_audit_trail():
+    """A shared audit.jsonl merges accounts. The allocator reads that file for
+    its veto-rate firing signal, so decisions made while testing on a throwaway
+    account would fire a strategy on the scored account before it had traded."""
+    from aperture.state import audit_path_for
+
+    judged = audit_path_for("state/judged.json")
+    dev = audit_path_for("state/dev.json")
+    assert judged.name == "judged.audit.jsonl"
+    assert dev.name == "dev.audit.jsonl"
+    assert judged != dev
+    assert judged.parent == dev.parent == Path("state")
+
+
+def test_audit_path_accepts_a_path_or_a_string():
+    from aperture.state import audit_path_for
+
+    assert audit_path_for(Path("a/b/book.json")) == Path("a/b/book.audit.jsonl")
+    assert audit_path_for("a/b/book.json") == Path("a/b/book.audit.jsonl")
+
+
+def test_runner_and_status_agree_on_the_audit_location():
+    """If they disagree, the status tool reports on a file nothing writes to."""
+    import inspect
+    from aperture import runner, status
+    from aperture.state import audit_path_for
+
+    assert "audit_path_for" in inspect.getsource(runner.Runner.__init__)
+    assert "audit_path_for" in inspect.getsource(status.main)
+    assert audit_path_for("state/judged.json").name == "judged.audit.jsonl"

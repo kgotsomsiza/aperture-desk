@@ -21,6 +21,19 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def audit_path_for(state_path: "Path | str") -> Path:
+    """The audit trail belonging to one ledger.
+
+    Derived from the ledger's own name, never a fixed filename. A shared
+    audit.jsonl silently merges accounts, and the allocator reads that file for
+    its veto-rate signal -- so a strategy refused repeatedly while testing on a
+    throwaway account would be fired on the scored account before it had placed
+    a single trade there. The evidence must belong to the book it describes.
+    """
+    path = Path(state_path)
+    return path.with_name(f"{path.stem}.audit.jsonl")
+
+
 @dataclass
 class OpenTrade:
     """One submitted structure and its broker-confirmed lifecycle.

@@ -36,7 +36,7 @@ from .identity import WrongAccountError, check as check_account
 from .marketdata import MarketData, Snapshot
 from .contracts import PositionIntent
 from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
-from .state import DeskState, OpenTrade
+from .state import DeskState, audit_path_for, OpenTrade
 from .strategies import carry, crush, drift
 from .strategies.hired import HiredCondorStrategy
 from .strategies.base import Strategy, structure_price
@@ -1099,7 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
     state = DeskState.load(args.state)
     warden = RiskWarden(
         limits=RiskLimits(),
-        audit=AuditLog(path=Path(args.state).parent / "audit.jsonl"),
+        audit=AuditLog(path=audit_path_for(args.state)),
         deadline=DEADLINE,
         start_equity=state.start_equity or args.equity,
         budgets=_budgets(state.start_equity or args.equity),

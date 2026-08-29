@@ -45,7 +45,7 @@ from .marketdata import MarketData
 from .research import promotion_records, run_lab
 from .risk import RiskLimits
 from .snapshot import Snapshot, publish_remote, write
-from .state import DeskState
+from .state import DeskState, audit_path_for
 from .warden import AuditLog, RiskWarden
 
 log = logging.getLogger("aperture.runner")
@@ -62,7 +62,7 @@ class Runner:
         self.cli = AlpacaCLI()
         self.md = MarketData(cli=self.cli, feed=args.feed)
         self.state_path = Path(args.state)
-        self.audit = AuditLog(path=self.state_path.parent / "audit.jsonl")
+        self.audit = AuditLog(path=audit_path_for(self.state_path))
         self.provider = build_provider()
 
         signal.signal(signal.SIGINT, self._stop)
