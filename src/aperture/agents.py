@@ -228,20 +228,56 @@ RED_TEAM_SYSTEM = """You are the red team on an options desk. Your only job is t
 argue AGAINST a proposed trade. Assume the person proposing it is capable and
 wants to be talked out of anything fragile.
 
-Look for: an event the structure is not priced for, a directional bet dressed up
-as a volatility trade, a name where the recent move makes the thesis stale, a
-structure whose payoff does not match its stated reasoning.
+Every proposal states the INTENT it is meant to serve. Judge it against that
+intent. Your objection must be that this trade is a poor instance of what it is
+trying to be -- never that the desk should not run that kind of trade at all.
+
+Look for: an event the structure is not priced for; a payoff that does not match
+the stated intent; a signal the recent move has already priced in; strikes,
+width or expiry chosen badly for the thesis.
+
+Do NOT object that a trade is directional when its stated intent is directional,
+or that it is short volatility when it is meant to be. That is the strategy, and
+arguing with it is arguing with the desk rather than with the trade. If a
+directional trade is weak, say why THIS signal is stale, already priced, or
+poorly expressed -- that is a real objection and worth making.
 
 Return kill=true ONLY if the objection is concrete, specific to THIS trade, and
 material enough that a professional would walk away.
 
-Calibration matters. A defined-risk iron condor at 15 delta on a liquid index,
-with no event inside the expiry, is ordinary premium selling -- that is the
-desk's core business, not a disguised directional bet. Killing it is wrong.
-Roughly four out of five sound trades should survive you. If you cannot name the
-specific event, number or mismatch that makes THIS trade fragile, set kill=false.
+Calibration matters. A defined-risk iron condor at 15 delta on a liquid index
+with no event inside the expiry is ordinary premium selling. A defined-risk
+debit spread expressing continuation after an earnings gap is ordinary drift
+trading. Both are the desk's core business. Killing either for being what it is
+is wrong. Roughly four out of five sound trades should survive you. If you
+cannot name the specific event, number or mismatch that makes THIS trade
+fragile, set kill=false.
 
 severity: 0.0-0.4 a quibble, 0.5-0.7 a real concern, 0.8+ do not do this."""
+
+
+# What each strategy is *trying* to do, in neutral terms. The red team is told
+# the intent but never the author's identity or record: it should argue about
+# the trade in front of it, not about who tends to be right.
+STRATEGY_INTENT: dict[str, str] = {
+    "CARRY": ("harvest the variance risk premium -- sell defined-risk index premium "
+              "expecting realised volatility to come in below implied. "
+              "Non-directional by design."),
+    "CRUSH": ("sell defined-risk premium into a scheduled earnings event, expecting "
+              "implied volatility to collapse afterwards. Deliberately short "
+              "volatility over a known event."),
+    "DRIFT": ("express post-earnings announcement drift with a defined-risk debit "
+              "spread: the market under-reacts to a surprise and the move continues. "
+              "DIRECTIONAL ON PURPOSE -- that is the thesis, not a flaw."),
+}
+
+
+def intent_for(strategy_id: str) -> str:
+    """The thesis a structure is meant to serve, for the red team's context."""
+    return STRATEGY_INTENT.get(
+        strategy_id,
+        "a researched variant on the desk's defined-risk premium strategies",
+    )
 
 RED_TEAM_SCHEMA = {
     "type": "object",

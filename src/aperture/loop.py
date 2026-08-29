@@ -35,7 +35,7 @@ from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side, parse_occ
 from .agents import (
     RedTeamVerdict, apply_kill_budget, call_regime, choose_universe,
-    rank_proposals, red_team,
+    intent_for, rank_proposals, red_team,
 )
 from .earnings import EarningsCalendar
 from .execution import adapt, clamp, measure_fills
@@ -379,6 +379,7 @@ def run_cycle(
                     False, "not challenged: red team budget spent", 0.0, "budget"))
                 continue
             verdicts.append(red_team(agent, proposal.rationale, {
+                "intent": intent_for(proposal.strategy_id),
                 "underlying": proposal.underlying,
                 "structure_legs": len(proposal.legs),
                 "net_price": proposal.net_price,

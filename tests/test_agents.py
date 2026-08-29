@@ -291,3 +291,43 @@ def test_a_kill_now_needs_real_conviction():
                           "objection": "earnings inside the expiry"}), "sell SPY condor", {})
     assert not below.killed
     assert at.killed
+
+
+# --------------------------------------------------------------------------- #
+# Intent: arguing with the trade, not with the strategy
+# --------------------------------------------------------------------------- #
+
+
+def test_every_strategy_states_an_intent():
+    from aperture.agents import intent_for
+
+    for strategy in ("CARRY", "CRUSH", "DRIFT"):
+        assert len(intent_for(strategy)) > 40
+
+
+def test_a_hired_strategy_still_gets_an_intent():
+    from aperture.agents import intent_for
+
+    assert intent_for("HIRED_CONDOR_7")
+
+
+def test_drift_is_declared_directional_on_purpose():
+    """Observed in two live rehearsals: the red team killed DRIFT's NVDA trade
+    both times for being 'a directional bet dressed as a convexity play'. That
+    is DRIFT's entire thesis. The prompt told it to hunt for exactly that and
+    never told it some strategies are directional by design, so it vetoed a
+    whole strategy on principle -- 18% of the book's budget."""
+    from aperture.agents import RED_TEAM_SYSTEM, intent_for
+
+    assert "DIRECTIONAL ON PURPOSE" in intent_for("DRIFT")
+    assert "drift" in RED_TEAM_SYSTEM.lower()
+    assert "Do NOT object that a trade is directional" in RED_TEAM_SYSTEM
+
+
+def test_the_red_team_is_told_intent_but_never_the_author():
+    """Intent is the thesis, not the proposer. Knowing which strategy has been
+    winning would make this an allocator, and it is not one."""
+    from aperture.agents import STRATEGY_INTENT
+
+    for text in STRATEGY_INTENT.values():
+        assert "CARRY" not in text and "CRUSH" not in text and "DRIFT" not in text
