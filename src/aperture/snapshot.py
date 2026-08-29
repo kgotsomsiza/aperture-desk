@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
 from .state import DeskState
@@ -38,6 +42,7 @@ POSITION_FIELDS = (
 )
 
 AUDIT_FIELDS = ("ts", "event", "strategy", "underlying", "summary", "rationale", "reason")
+PUBLIC_MODES = {"demo", "practice", "scoring", "final"}
 
 
 def _clean(value: Any) -> Any:
@@ -56,8 +61,15 @@ class Snapshot:
         account = self._account()
         equity = float(account.get("equity") or 0.0)
         start = self.state.start_equity or equity
+        mode = os.environ.get("APERTURE_PUBLIC_MODE", "practice").strip().lower()
+        if mode not in PUBLIC_MODES:
+            raise ValueError(
+                f"APERTURE_PUBLIC_MODE must be one of {', '.join(sorted(PUBLIC_MODES))}"
+            )
 
         return {
+            "schema_version": 1,
+            "mode": mode,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),
             "start_equity": round(start, 2),
@@ -243,3 +255,52 @@ def write(payload: dict[str, Any], path: Path | str = "public/snapshot.json") ->
     tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def publish_remote(
+    payload: dict[str, Any],
+    *,
+    endpoint: str | None = None,
+    token: str | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Publish a public-safe snapshot to the dashboard Worker.
+
+    The remote channel is optional.  Returning ``False`` means it is completely
+    unconfigured; partial configuration is an error because silently accepting a
+    URL without authentication (or a token without a destination) is a deployment
+    trap.  Plain HTTP is permitted only for a loopback development server.
+    """
+    endpoint = (endpoint or os.environ.get("APERTURE_SNAPSHOT_URL") or "").strip()
+    token = (token or os.environ.get("APERTURE_PUBLISH_TOKEN") or "").strip()
+    if not endpoint and not token:
+        return False
+    if not endpoint or not token:
+        raise ValueError(
+            "remote snapshot publishing requires both APERTURE_SNAPSHOT_URL "
+            "and APERTURE_PUBLISH_TOKEN"
+        )
+
+    parsed = urlsplit(endpoint)
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+        raise ValueError("remote snapshot endpoint must use HTTPS (except loopback development)")
+
+    assert_publishable(payload)
+    own_client = client is None
+    sender = client or httpx.Client(timeout=httpx.Timeout(10.0))
+    try:
+        response = sender.post(
+            endpoint,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "aperture-desk/0.1 snapshot-publisher",
+            },
+        )
+        response.raise_for_status()
+    finally:
+        if own_client:
+            sender.close()
+    return True

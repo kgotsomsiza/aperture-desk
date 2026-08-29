@@ -44,7 +44,7 @@ from .loop import (
 from .marketdata import MarketData
 from .research import promotion_records, run_lab
 from .risk import RiskLimits
-from .snapshot import Snapshot, write
+from .snapshot import Snapshot, publish_remote, write
 from .state import DeskState
 from .warden import AuditLog, RiskWarden
 
@@ -297,7 +297,14 @@ class Runner:
             payload = Snapshot(state=state, audit=self.audit, cli=self.cli).build()
             write(payload, self.args.public)
         except Exception as exc:  # noqa: BLE001 - publishing must never stop trading
-            log.warning("snapshot publish failed: %s", exc)
+            log.warning("local snapshot publish failed: %s", exc)
+            return
+
+        try:
+            if publish_remote(payload):
+                log.info("public snapshot accepted by dashboard")
+        except Exception as exc:  # noqa: BLE001 - a dashboard can never stop trading
+            log.warning("remote snapshot publish failed: %s", exc)
 
     def _until_open(self, clock: dict) -> int:
         nxt = clock.get("next_open")

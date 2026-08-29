@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "mode": "demo",
+  "generated_at": "2026-08-28T20:30:00+00:00",
+  "equity": 101842.35,
+  "start_equity": 100000.0,
+  "total_return_pct": 1.842,
+  "day_pnl_pct": 0.314,
+  "high_water_mark": 102105.7,
+  "drawdown_pct": 0.258,
+  "open_risk": 12450.0,
+  "positions": [],
+  "open_trades": [
+    {
+      "strategy": "CARRY",
+      "underlying": "SPY",
+      "qty": 3,
+      "net_price": -0.74,
+      "max_loss": 1278.0,
+      "opened_at": "2026-08-27T15:18:11+00:00",
+      "filled_at": "2026-08-27T15:18:14+00:00",
+      "status": "open",
+      "rationale": "Delta-selected index iron condor with bounded wings.",
+      "legs": ["SPY260904P00685000", "SPY260904P00690000", "SPY260904C00740000", "SPY260904C00745000"]
+    },
+    {
+      "strategy": "CARRY",
+      "underlying": "QQQ",
+      "qty": 2,
+      "net_price": -0.8,
+      "max_loss": 840.0,
+      "opened_at": "2026-08-27T15:20:02+00:00",
+      "filled_at": "2026-08-27T15:20:07+00:00",
+      "status": "open",
+      "rationale": "Liquid index premium with defined maximum loss.",
+      "legs": ["QQQ260904P00630000", "QQQ260904P00635000", "QQQ260904C00695000", "QQQ260904C00700000"]
+    },
+    {
+      "strategy": "CRUSH",
+      "underlying": "NVDA",
+      "qty": 2,
+      "net_price": 2.14,
+      "max_loss": 428.0,
+      "opened_at": "2026-08-28T19:06:45+00:00",
+      "filled_at": "2026-08-28T19:06:49+00:00",
+      "status": "open",
+      "rationale": "Bounded post-earnings volatility structure; scheduled next-session exit.",
+      "legs": ["NVDA260904P00220000", "NVDA260904C00230000"]
+    },
+    {
+      "strategy": "DRIFT",
+      "underlying": "CRM",
+      "qty": 2,
+      "net_price": 1.08,
+      "max_loss": 216.0,
+      "opened_at": "2026-08-28T19:12:01+00:00",
+      "filled_at": "2026-08-28T19:12:05+00:00",
+      "status": "open",
+      "rationale": "Post-earnings drift expressed as a capped-risk vertical.",
+      "legs": ["CRM260904C00265000", "CRM260904C00280000"]
+    },
+    {
+      "strategy": "LAB-7F3A19C2",
+      "underlying": "SPY",
+      "qty": 1,
+      "net_price": -0.66,
+      "max_loss": 434.0,
+      "opened_at": "2026-08-28T19:23:28+00:00",
+      "filled_at": "2026-08-28T19:23:32+00:00",
+      "status": "open",
+      "rationale": "Research-lab condor funded at the probation allocation.",
+      "legs": ["SPY260911P00680000", "SPY260911P00685000", "SPY260911C00745000", "SPY260911C00750000"]
+    }
+  ],
+  "attribution": [
+    {"strategy": "CARRY", "open": 2, "closed": 7, "wins": 5, "realized_pnl": 1284.0, "risk_at_work": 2118.0, "win_rate": 71.4},
+    {"strategy": "CRUSH", "open": 1, "closed": 3, "wins": 2, "realized_pnl": 438.0, "risk_at_work": 428.0, "win_rate": 66.7},
+    {"strategy": "DRIFT", "open": 1, "closed": 4, "wins": 2, "realized_pnl": 120.35, "risk_at_work": 216.0, "win_rate": 50.0},
+    {"strategy": "LAB-7F3A19C2", "open": 1, "closed": 0, "wins": 0, "realized_pnl": 0.0, "risk_at_work": 434.0, "win_rate": null}
+  ],
+  "equity_curve": [
+    {"t": "2026-08-24T14:30:00+00:00", "equity": 100000.0},
+    {"t": "2026-08-24T17:30:00+00:00", "equity": 100184.0},
+    {"t": "2026-08-24T20:00:00+00:00", "equity": 100422.0},
+    {"t": "2026-08-25T14:30:00+00:00", "equity": 100318.0},
+    {"t": "2026-08-25T17:30:00+00:00", "equity": 100765.0},
+    {"t": "2026-08-25T20:00:00+00:00", "equity": 100690.0},
+    {"t": "2026-08-26T14:30:00+00:00", "equity": 100972.0},
+    {"t": "2026-08-26T17:30:00+00:00", "equity": 101340.0},
+    {"t": "2026-08-26T20:00:00+00:00", "equity": 101112.0},
+    {"t": "2026-08-27T14:30:00+00:00", "equity": 101455.0},
+    {"t": "2026-08-27T17:30:00+00:00", "equity": 101908.0},
+    {"t": "2026-08-27T20:00:00+00:00", "equity": 101524.0},
+    {"t": "2026-08-28T14:30:00+00:00", "equity": 101601.0},
+    {"t": "2026-08-28T17:30:00+00:00", "equity": 102105.7},
+    {"t": "2026-08-28T20:00:00+00:00", "equity": 101842.35}
+  ],
+  "recent_decisions": [
+    {"ts": "2026-08-28T20:05:09+00:00", "event": "letter_written", "strategy": "DESK", "summary": "Daily letter accepted only after every number matched the deterministic fact block."},
+    {"ts": "2026-08-28T19:23:32+00:00", "event": "entry_filled", "strategy": "LAB-7F3A19C2", "underlying": "SPY", "summary": "Atomic four-leg order fully filled; $434 maximum loss entered the ledger."},
+    {"ts": "2026-08-28T19:22:58+00:00", "event": "approved", "strategy": "LAB-7F3A19C2", "underlying": "SPY", "summary": "Probation proposal passed all structural, sizing, liquidity, and timing gates."},
+    {"ts": "2026-08-28T18:58:12+00:00", "event": "veto", "strategy": "CARRY", "underlying": "IWM", "summary": "VETOED liquidity: quoted spread exceeded 15% of mid."},
+    {"ts": "2026-08-28T18:42:16+00:00", "event": "hired", "strategy": "LAB-7F3A19C2", "underlying": "SPY", "summary": "Wider-wing mutation beat the incumbent on an untouched chronological holdout."},
+    {"ts": "2026-08-28T18:42:15+00:00", "event": "research_complete", "strategy": "LAB", "underlying": "SPY", "summary": "18 candidates tested; the promotion bar accounted for 54 cumulative trials."},
+    {"ts": "2026-08-28T17:11:02+00:00", "event": "close_filled", "strategy": "CARRY", "underlying": "SPY", "summary": "Confirmed reverse multi-leg fill closed the structure for +$312 realized P&L."},
+    {"ts": "2026-08-28T15:47:30+00:00", "event": "veto", "strategy": "DRIFT", "underlying": "MDB", "summary": "VETOED concentration: proposed maximum loss breached the 8% underlying cap."},
+    {"ts": "2026-08-28T14:31:05+00:00", "event": "cycle_complete", "strategy": "DESK", "summary": "Broker positions and fill-confirmed ledger reconciled exactly before new proposals."}
+  ],
+  "roster": [
+    {"strategy": "CARRY", "origin": "designed", "status": "funded", "weight": 0.52},
+    {"strategy": "CRUSH", "origin": "designed", "status": "funded", "weight": 0.18},
+    {"strategy": "DRIFT", "origin": "designed", "status": "funded", "weight": 0.25},
+    {
+      "strategy": "LAB-7F3A19C2",
+      "origin": "research_lab",
+      "status": "probation",
+      "weight": 0.05,
+      "hired_at": "2026-08-28T18:42:16+00:00",
+      "mutation": "Wider wings: 1.5% → 2.0%",
+      "evidence": {"trades": 16, "wins": 12, "edge": 0.073, "t_stat": 2.84, "total_pnl": 1842.0, "max_drawdown": 318.0},
+      "reason": "Selection and holdout both beat the incumbent after cumulative multiple-testing correction."
+    }
+  ],
+  "research": {
+    "session": "2026-08-28",
+    "tested": 18,
+    "cumulative_trials": 54,
+    "promoted": ["LAB-7F3A19C2"],
+    "training_window": ["2024-03-04", "2026-01-30"],
+    "validation_window": ["2026-03-06", "2026-07-29"],
+    "reasoning": {"vendor": "featherless", "fast_model": "Qwen/Qwen3-Next-80B-A3B-Instruct"},
+    "summary": "18 candidates tested; 1 promoted. The candidate was selected on history through 2026-01-30, separated by a 35-day embargo, then beat the incumbent on the untouched 2026-03-06..2026-07-29 holdout. The promotion bar accounted for 54 cumulative trials."
+  },
+  "shareholder_letter": {
+    "as_of": "2026-08-28",
+    "text": "The desk finished at $101,842.35, up 1.842% from its $100,000 start and 0.314% today. Drawdown from the $102,105.70 high-water mark was 0.258%. Five structures carried $12,450 of defined maximum loss. The Warden has vetoed 17 proposals. Tonight the lab tested 18 bounded mutations and hired LAB-7F3A19C2 on 5% probation after an embargoed chronological holdout. CARRY retained the largest allocation because its confirmed closes produced the strongest realized return on risk. No language model altered a risk limit or sent an order.",
+    "reasoning": {"vendor": "featherless", "reasoning_model": "moonshotai/Kimi-K2-Instruct"}
+  },
+  "counts": {"open": 5, "pending": 0, "closed": 14, "vetoes": 17}
+}

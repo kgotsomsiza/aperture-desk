@@ -635,8 +635,11 @@ def test_snapshot_strips_account_identifiers(tmp_path):
     assert "asset_id" not in blob
 
 
-def test_snapshot_reports_the_numbers_that_matter(tmp_path):
+def test_snapshot_reports_the_numbers_that_matter(tmp_path, monkeypatch):
+    monkeypatch.setenv("APERTURE_PUBLIC_MODE", "scoring")
     payload = build_snapshot(tmp_path)
+    assert payload["schema_version"] == 1
+    assert payload["mode"] == "scoring"
     assert payload["equity"] == 104_250.0
     assert payload["total_return_pct"] == pytest.approx(4.25)
     assert payload["high_water_mark"] == 104_250.0

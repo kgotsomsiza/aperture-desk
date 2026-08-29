@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Aperture is an autonomous options desk that researches, hires, funds, and fires its own strategies under deterministic risk control."
+    />
+    <meta name="theme-color" content="#090b0f" />
+    <title>Aperture — Autonomous Options Desk</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to dashboard</a>
+
+    <div class="demo-banner" id="demo-banner" role="status" hidden>
+      <span>DEMO SCENARIO</span>
+      No live snapshot has been published yet. Every number below is clearly marked sample data.
+    </div>
+
+    <header class="masthead">
+      <nav class="nav shell" aria-label="Primary navigation">
+        <a class="wordmark" href="#top" aria-label="Aperture home">
+          <span class="mark" aria-hidden="true"><i></i><i></i></span>
+          <span>APERTURE</span>
+        </a>
+        <div class="nav-meta">
+          <span class="nav-edition">ALPACA AI TRADING AGENTS · 2026</span>
+          <a href="#autonomy">Autonomy</a>
+          <a href="#risk">Risk charter</a>
+        </div>
+      </nav>
+
+      <div class="hero shell" id="top">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="pulse-dot"></span> AUTONOMOUS OPTIONS DESK</div>
+          <h1>A desk that hires<br />its own <em>strategies.</em></h1>
+          <p class="hero-deck">
+            Aperture researches bounded options strategies, promotes only those that survive a
+            chronological holdout, and lets a deterministic Risk Warden decide whether any order
+            reaches Alpaca.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#autonomy">Watch the desk think</a>
+            <a class="button button-secondary" href="#method">Read the method</a>
+          </div>
+          <div class="trust-line" aria-label="Technology roles">
+            <span><b>ALPACA</b> execution + market data</span>
+            <span><b>FEATHERLESS</b> research + explanation</span>
+            <span><b>PYTHON</b> final risk authority</span>
+          </div>
+        </div>
+
+        <aside class="system-card" aria-label="Live desk state">
+          <div class="system-head">
+            <div>
+              <span class="label">DESK STATE</span>
+              <strong id="desk-state">CONNECTING</strong>
+            </div>
+            <span class="mode-pill" id="mode-pill">—</span>
+          </div>
+
+          <div class="flow" aria-label="Autonomous decision pipeline">
+            <div class="flow-row">
+              <span class="flow-index">01</span>
+              <div><b>Research Lab</b><small>Featherless proposes bounded mutations</small></div>
+              <span class="flow-state" id="flow-research">READY</span>
+            </div>
+            <div class="flow-rail"><span></span></div>
+            <div class="flow-row">
+              <span class="flow-index">02</span>
+              <div><b>Promotion Gate</b><small>Embargoed chronological holdout</small></div>
+              <span class="flow-state" id="flow-promotion">VERIFY</span>
+            </div>
+            <div class="flow-rail"><span></span></div>
+            <div class="flow-row flow-row-warden">
+              <span class="flow-index">03</span>
+              <div><b>Risk Warden</b><small>Defined-risk geometry + hard limits</small></div>
+              <span class="flow-state">FINAL</span>
+            </div>
+            <div class="flow-rail"><span></span></div>
+            <div class="flow-row">
+              <span class="flow-index">04</span>
+              <div><b>Alpaca MLeg</b><small>Atomic, fill-confirmed execution</small></div>
+              <span class="flow-state" id="flow-execution">SYNCED</span>
+            </div>
+          </div>
+
+          <div class="system-foot">
+            <span><i class="live-lamp"></i><span id="freshness-label">Awaiting snapshot</span></span>
+            <time id="generated-time">—</time>
+          </div>
+        </aside>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="ticker" aria-label="Performance overview">
+        <div class="shell metric-grid">
+          <article class="metric metric-lead">
+            <span class="label">ACCOUNT EQUITY</span>
+            <strong id="metric-equity">—</strong>
+            <small id="metric-equity-context">From a $100k paper account</small>
+          </article>
+          <article class="metric">
+            <span class="label">TOTAL RETURN</span>
+            <strong id="metric-return">—</strong>
+            <small>Since desk inception</small>
+          </article>
+          <article class="metric">
+            <span class="label">TODAY</span>
+            <strong id="metric-day">—</strong>
+            <small>Marked to market</small>
+          </article>
+          <article class="metric">
+            <span class="label">DRAWDOWN</span>
+            <strong id="metric-drawdown">—</strong>
+            <small>From high-water mark</small>
+          </article>
+          <article class="metric">
+            <span class="label">DEFINED RISK OPEN</span>
+            <strong id="metric-risk">—</strong>
+            <small id="metric-structures">— structures</small>
+          </article>
+          <article class="metric">
+            <span class="label">WARDEN VETOES</span>
+            <strong id="metric-vetoes">—</strong>
+            <small>Unsafe proposals stopped</small>
+          </article>
+        </div>
+      </section>
+
+      <section class="section shell" id="autonomy">
+        <div class="section-kicker">THE AUTONOMY PROOF</div>
+        <div class="section-title-row">
+          <div>
+            <h2>Not a signal bot.<br />A capital-allocation loop.</h2>
+          </div>
+          <p>
+            The model never places an order. It helps the desk form testable hypotheses and explain
+            results. Promotion, sizing, vetoes, fills, and P&amp;L attribution stay deterministic and
+            auditable.
+          </p>
+        </div>
+
+        <div class="proof-grid">
+          <article class="proof-card proof-research">
+            <div class="proof-number">01</div>
+            <span class="label">RESEARCH LAB</span>
+            <h3>Generate. Test. Hire.</h3>
+            <p>
+              Featherless selects one-knob mutations from a bounded strategy family without seeing
+              outcomes. Python tests them against real option history and an untouched holdout.
+            </p>
+            <div class="proof-stat-row">
+              <div><strong id="research-tested">—</strong><span>tested tonight</span></div>
+              <div><strong id="research-trials">—</strong><span>cumulative trials</span></div>
+            </div>
+            <div class="proof-event" id="promotion-event">
+              <span class="event-icon">↗</span>
+              <div><small>LATEST OUTCOME</small><b id="promotion-title">Awaiting research</b></div>
+            </div>
+          </article>
+
+          <article class="proof-card proof-warden">
+            <div class="proof-number">02</div>
+            <span class="label">RISK WARDEN</span>
+            <h3>Language proposes.<br />Code disposes.</h3>
+            <p>
+              Every structure is reduced to expiry payoff geometry, then checked against liquidity,
+              concentration, quote freshness, loss limits, and the tournament clock.
+            </p>
+            <div class="gate-stack" aria-label="Selected risk gates">
+              <span><i>✓</i> DEFINED RISK ONLY</span>
+              <span><i>✓</i> QUOTES ≤ 90 SECONDS</span>
+              <span><i>✓</i> MAX 4% PER TRADE</span>
+              <span><i>✓</i> ATOMIC MULTI-LEG ORDERS</span>
+            </div>
+          </article>
+
+          <article class="proof-card proof-capital">
+            <div class="proof-number">03</div>
+            <span class="label">CAPITAL MARKET</span>
+            <h3>Performance is the vote.</h3>
+            <p>
+              Realized return on risk earns allocation. Repeated vetoes count as evidence of
+              miscalibration. New hires start at 5%; persistent failure means no new capital.
+            </p>
+            <div class="mini-roster" id="mini-roster" aria-label="Current strategy allocation"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section section-performance">
+        <div class="shell split-grid">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <span class="label">PORTFOLIO EQUITY</span>
+                <h3>One-week mark</h3>
+              </div>
+              <div class="chart-summary">
+                <strong id="chart-change">—</strong>
+                <span id="chart-range">No observations</span>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <svg id="equity-chart" viewBox="0 0 840 300" role="img" aria-labelledby="chart-title chart-desc">
+                <title id="chart-title">Account equity over the last week</title>
+                <desc id="chart-desc">The chart will update when a snapshot is loaded.</desc>
+                <defs>
+                  <linearGradient id="area-fill" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0" stop-color="#c8ff54" stop-opacity="0.28"></stop>
+                    <stop offset="1" stop-color="#c8ff54" stop-opacity="0"></stop>
+                  </linearGradient>
+                </defs>
+                <g class="chart-grid" aria-hidden="true">
+                  <line x1="52" y1="36" x2="818" y2="36"></line>
+                  <line x1="52" y1="105" x2="818" y2="105"></line>
+                  <line x1="52" y1="174" x2="818" y2="174"></line>
+                  <line x1="52" y1="243" x2="818" y2="243"></line>
+                </g>
+                <g id="chart-dynamic"></g>
+              </svg>
+            </div>
+            <div class="chart-legend">
+              <span><i class="legend-line"></i> Account equity</span>
+              <span>Alpaca portfolio history · hourly</span>
+            </div>
+          </article>
+
+          <article class="panel lab-panel">
+            <div class="panel-head">
+              <div>
+                <span class="label">LATEST LAB RUN</span>
+                <h3 id="lab-session">Awaiting close</h3>
+              </div>
+              <span class="status-chip" id="lab-status">IDLE</span>
+            </div>
+            <div class="lab-window">
+              <div>
+                <small>SELECTION WINDOW</small>
+                <b id="training-window">—</b>
+              </div>
+              <span class="embargo">35D<br /><i>EMBARGO</i></span>
+              <div>
+                <small>UNTOUCHED HOLDOUT</small>
+                <b id="validation-window">—</b>
+              </div>
+            </div>
+            <p class="lab-summary" id="lab-summary">
+              The nightly lab runs only after a completed market session.
+            </p>
+            <div class="model-ledger">
+              <div>
+                <span class="model-mark">F</span>
+                <div><small>HYPOTHESIS MODEL</small><b id="fast-model">Not configured</b></div>
+              </div>
+              <div>
+                <span class="model-mark">F</span>
+                <div><small>EXPLANATION MODEL</small><b id="reasoning-model">Not configured</b></div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section shell">
+        <div class="section-heading-compact">
+          <div>
+            <span class="section-kicker">THE ROSTER</span>
+            <h2>Strategies are employees.</h2>
+          </div>
+          <p>Each gets a budget, a record, and a reason to remain on the desk.</p>
+        </div>
+        <div class="roster-grid" id="roster-grid"></div>
+      </section>
+
+      <section class="section section-book">
+        <div class="shell book-grid">
+          <article class="panel structures-panel">
+            <div class="panel-head">
+              <div><span class="label">LIVE BOOK</span><h3>Open structures</h3></div>
+              <span class="panel-count" id="open-count">0</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <caption>Open options structures and their maximum loss</caption>
+                <thead>
+                  <tr><th>Strategy</th><th>Underlying</th><th>Structure</th><th>Max loss</th><th>Status</th></tr>
+                </thead>
+                <tbody id="structures-body"></tbody>
+              </table>
+            </div>
+            <p class="empty-state" id="structures-empty" hidden>No open structures.</p>
+          </article>
+
+          <article class="panel attribution-panel">
+            <div class="panel-head">
+              <div><span class="label">SCOREBOARD</span><h3>Strategy attribution</h3></div>
+              <span class="panel-note">fill-derived</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <caption>Per-strategy realized performance and risk</caption>
+                <thead>
+                  <tr><th>Strategy</th><th>Closed</th><th>Win rate</th><th>Realized</th><th>Risk at work</th></tr>
+                </thead>
+                <tbody id="attribution-body"></tbody>
+              </table>
+            </div>
+            <p class="empty-state" id="attribution-empty" hidden>No attributed trades yet.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section shell" id="risk">
+        <div class="risk-layout">
+          <div class="risk-intro">
+            <span class="section-kicker">THE NON-NEGOTIABLES</span>
+            <h2>The Warden<br />does not negotiate.</h2>
+            <p>
+              These limits are code, not prompts. The reasoning model cannot raise them, skip them,
+              or reinterpret them after seeing a trade it likes.
+            </p>
+            <div class="risk-seal" aria-label="Deterministic authority">
+              <span>FINAL<br />AUTHORITY</span><b>RISK<br />WARDEN</b>
+            </div>
+          </div>
+          <div class="risk-rules">
+            <article><strong>4%</strong><div><b>MAX LOSS / TRADE</b><span>Worst-case expiry payoff, not premium paid</span></div></article>
+            <article><strong>8%</strong><div><b>MAX / UNDERLYING</b><span>Stops correlated structures piling into one symbol</span></div></article>
+            <article><strong>25%</strong><div><b>PORTFOLIO RISK CAP</b><span>Sum of defined maximum losses across the book</span></div></article>
+            <article><strong>−3%</strong><div><b>DAILY ENTRY HALT</b><span>Existing exits continue; new entries stop</span></div></article>
+            <article><strong>−8%</strong><div><b>DRAWDOWN BREAKER</b><span>Active kill switch and atomic flattening</span></div></article>
+            <article><strong>14:00</strong><div><b>THURSDAY FLATTEN · ET</b><span>Exit before the Friday tournament snapshot</span></div></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-tape">
+        <div class="shell tape-layout">
+          <div class="tape-copy">
+            <span class="section-kicker">APPEND-ONLY AUDIT</span>
+            <h2>Every decision<br />leaves a receipt.</h2>
+            <p>
+              Proposals, veto reasons, fills, hires, fires, and research outcomes are recorded as
+              events. The dashboard exposes the public-safe subset.
+            </p>
+          </div>
+          <ol class="decision-tape" id="decision-tape" aria-live="polite"></ol>
+        </div>
+      </section>
+
+      <section class="section shell" id="method">
+        <div class="letter-grid">
+          <article class="letter-card">
+            <div class="letter-head">
+              <div><span class="label">DAILY SHAREHOLDER LETTER</span><h3 id="letter-date">Awaiting first close</h3></div>
+              <span class="featherless-badge">WRITTEN WITH FEATHERLESS</span>
+            </div>
+            <blockquote id="shareholder-letter">
+              After each session, the reasoning layer explains a deterministic fact block. The
+              publisher rejects invented or rounded numbers.
+            </blockquote>
+            <div class="letter-signoff"><span>THE APERTURE DESK</span><span>FACTS LOCKED BY CODE</span></div>
+          </article>
+
+          <aside class="method-card">
+            <span class="label">WHY THIS ARCHITECTURE</span>
+            <h3>Intelligence with a hard boundary.</h3>
+            <ol>
+              <li><b>Reason</b><span>Models form hypotheses and explain evidence.</span></li>
+              <li><b>Verify</b><span>Chronological tests and deterministic payoff math decide.</span></li>
+              <li><b>Execute</b><span>Alpaca receives atomic, idempotent multi-leg orders.</span></li>
+              <li><b>Reconcile</b><span>Only broker-confirmed fills enter the risk ledger.</span></li>
+            </ol>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="shell footer-grid">
+        <div>
+          <a class="wordmark" href="#top"><span class="mark" aria-hidden="true"><i></i><i></i></span><span>APERTURE</span></a>
+          <p>Autonomous options research. Deterministic risk. Fill-confirmed execution.</p>
+        </div>
+        <div class="footer-meta">
+          <span>Paper trading only · Not investment advice</span>
+          <span id="footer-updated">Snapshot not loaded</span>
+          <span>Built for the 2026 Alpaca AI Trading Agents Hackathon</span>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

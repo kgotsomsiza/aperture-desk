@@ -1,6 +1,7 @@
 """Closed-market orchestration: research, hiring, and Featherless explanation."""
 
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 from aperture.backtest import BacktestResult, CondorSpec, SimulatedTrade
 from aperture.research import Candidate, LabReport
@@ -109,3 +110,33 @@ def test_after_close_hires_persists_and_uses_featherless_once(monkeypatch, tmp_p
     assert "research_complete" in events
     assert "hired" in events
     assert "letter_written" in events
+
+
+def test_remote_dashboard_failure_cannot_undo_local_snapshot(monkeypatch, tmp_path, caplog):
+    import aperture.runner as runner_module
+
+    payload = {"schema_version": 1, "mode": "practice", "equity": 100_000.0}
+
+    class BuiltSnapshot:
+        def __init__(self, **kwargs):
+            pass
+
+        def build(self):
+            return payload
+
+    def remote_failure(_payload):
+        raise RuntimeError("dashboard unavailable")
+
+    runner = Runner.__new__(Runner)
+    runner.state_path = tmp_path / "desk.json"
+    runner.audit = AuditLog(path=tmp_path / "audit.jsonl")
+    runner.cli = object()
+    runner.args = SimpleNamespace(public=str(tmp_path / "snapshot.json"))
+
+    monkeypatch.setattr(runner_module, "Snapshot", BuiltSnapshot)
+    monkeypatch.setattr(runner_module, "publish_remote", remote_failure)
+
+    runner.publish(DeskState(path=runner.state_path))
+
+    assert (tmp_path / "snapshot.json").exists()
+    assert "remote snapshot publish failed" in caplog.text

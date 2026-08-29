@@ -2,6 +2,9 @@
 .venv/
 venv/
 node_modules/
+dashboard/worker-configuration.d.ts
+dashboard/.wrangler/
+.dev.vars*
 __pycache__/
 *.py[cod]
 
