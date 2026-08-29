@@ -29,12 +29,16 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 45.0
+CACHE_TTL = 1_800.0   # headlines do not turn over every five minutes
+
+_cache: dict[tuple[str, ...], tuple[float, "MarketBrief"]] = {}
 
 
 @dataclass
@@ -114,21 +118,40 @@ def fetch_brief(
     *,
     news_per_symbol: int = 3,
     timeout: float = DEFAULT_TIMEOUT,
+    ttl: float = CACHE_TTL,
 ) -> MarketBrief:
     """Research through MCP, or an empty brief if it is not available.
 
     Deliberately total: every failure path returns an empty brief rather than
     raising. Research is an enrichment -- the desk trades without it, and an
     agent runtime problem must never reach the trading loop.
+
+    Successful briefs are cached for ``ttl`` seconds. A full ten-name research
+    pass costs about eighteen seconds and spawns a server process; run once per
+    five-minute cycle that is most of a working day spent re-reading headlines
+    that have not changed. Failures are never cached -- a transient outage must
+    not blind the desk for half an hour.
     """
     if not symbols:
         return MarketBrief()
+
+    key = tuple(symbols)
+    hit = _cache.get(key)
+    if hit and (time.monotonic() - hit[0]) < ttl:
+        return hit[1]
+
     try:
-        return asyncio.run(asyncio.wait_for(_gather(list(symbols), news_per_symbol), timeout))
+        brief = asyncio.run(
+            asyncio.wait_for(_gather(list(symbols), news_per_symbol), timeout)
+        )
     except Exception as exc:  # noqa: BLE001 - research must never break trading
         log.warning("MCP research unavailable (%s); agents will use CLI data only",
                     str(exc)[:140])
         return MarketBrief()
+
+    if brief.ok:
+        _cache[key] = (time.monotonic(), brief)
+    return brief
 
 
 def enrich(candidates: list[dict[str, Any]], brief: MarketBrief) -> list[dict[str, Any]]:
