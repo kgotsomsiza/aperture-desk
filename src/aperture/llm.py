@@ -181,6 +181,11 @@ class OpenAICompatibleProvider:
                 response = self.client.chat.completions.create(**kwargs)
             except Exception as exc:  # noqa: BLE001 - vendor SDKs raise broadly
                 last_error = str(exc)
+                if (_is_transient(last_error) and tier == "reasoning"
+                        and kwargs["model"] != self.fast_model):
+                    log.warning("%s busy; falling back to %s", self.label, self.fast_model)
+                    kwargs["model"] = self.fast_model
+                    continue
                 if not _is_transient(last_error) or attempt == self.max_attempts - 1:
                     raise LLMError(f"completion failed: {exc}") from exc
                 time.sleep(self.retry_backoff * (attempt + 1))
@@ -207,6 +212,16 @@ class OpenAICompatibleProvider:
                     self.json_mode = JSON_OBJECT
                     kwargs["response_format"] = {"type": "json_object"}
                     messages[0]["content"] += f"\n\nReply with JSON matching: {json_schema}"
+                    continue
+                # Large shared models are busy often enough that "busy" is a
+                # normal condition, not an incident. Falling back to the fast
+                # model keeps an agent's judgement in play; the alternative is
+                # the desk quietly reverting to no opinion at all.
+                if (_is_transient(problem) and tier == "reasoning"
+                        and kwargs["model"] != self.fast_model):
+                    log.warning("%s busy on %s; falling back to %s",
+                                self.label, kwargs["model"], self.fast_model)
+                    kwargs["model"] = self.fast_model
                     continue
                 if not _is_transient(problem) or attempt == self.max_attempts - 1:
                     raise LLMError(f"provider returned an error: {problem}")
@@ -316,7 +331,12 @@ def ask_json(
     try:
         raw = provider.complete(system=system, user=user, tier=tier, json_schema=schema)
         return extract_json(raw)
-    except (LLMError, json.JSONDecodeError, TypeError) as exc:
+    except Exception as exc:  # noqa: BLE001 - isolation IS this function's job
+        # Deliberately broad. This is the boundary between the agent layer and
+        # the trading loop, and its whole contract is that nothing crosses it.
+        # A narrower catch let a provider raising a plain RuntimeError abort an
+        # entire cycle -- so the desk stopped trading because a model misbehaved,
+        # which is the opposite of the intended failure mode.
         log.warning("structured call failed, using default: %s", exc)
         return default
 

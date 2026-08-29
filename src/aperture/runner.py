@@ -147,6 +147,7 @@ class Runner:
                 self.cli, self.md, warden, state, build_strategies(state),
                 dry_run=self.args.dry_run,
                 require_expected=not self.args.dry_run,
+                provider=self.provider,
             )
             log.info(
                 "cycle: %d approved (%d submitted), %d vetoed, %d closed%s",

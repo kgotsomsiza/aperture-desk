@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -31,10 +32,14 @@ from zoneinfo import ZoneInfo
 from .allocator import Allocator, observe, summarise
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side, parse_occ
+from .agents import (
+    apply_kill_budget, call_regime, choose_universe, rank_proposals, red_team,
+)
 from .earnings import EarningsCalendar
 from .execution import adapt, clamp, measure_fills
 from .identity import WrongAccountError, check as check_account
-from .marketdata import MarketData, Snapshot
+from .llm import LLMProvider, NullProvider
+from .marketdata import MarketData, Snapshot, realized_vol
 from .contracts import PositionIntent
 from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
 from .state import DeskState, audit_path_for, OpenTrade
@@ -146,11 +151,13 @@ def run_cycle(
     *,
     dry_run: bool = False,
     require_expected: bool = False,
+    provider: "LLMProvider | None" = None,
 ) -> dict:
     now = datetime.now(ET)
     summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0,
                "breached": None, "flattening": False, "fired": [],
-               "aggression": None, "fill_rate": None}
+               "aggression": None, "fill_rate": None,
+               "posture": None, "universe": [], "red_team_kills": 0}
 
     clock = cli.clock()
     if not clock.get("is_open"):
@@ -242,6 +249,31 @@ def run_cycle(
     for strategy in strategies:
         strategy.config.aggression = clamp(state.aggression)
 
+    # 6. The agents decide what the desk is doing today. Code still decides
+    #    whether any of it is allowed -- but WHAT to look at, and how hard to
+    #    lean, is judgement, and judgement is what the agents are for.
+    agent = provider or NullProvider()
+    regime = call_regime(agent, _market_conditions(md, state, book))
+    if regime.decided_by != "default":
+        log.info("regime: %s (%.0f%%) -- %s",
+                 regime.posture, regime.confidence * 100, regime.reason)
+        warden.audit.record(
+            "regime", posture=regime.posture, confidence=regime.confidence,
+            reason=regime.reason, ballast_tilt=regime.ballast_tilt,
+            convex_tilt=regime.convex_tilt,
+        )
+    summary["posture"] = regime.posture
+
+    universe = choose_universe(agent, _candidate_market(md), default=carry.DEFAULT_CONFIG.universe)
+    if universe.decided_by == "scout":
+        log.info("scout picked %s", ", ".join(universe.symbols))
+        warden.audit.record("universe", symbols=list(universe.symbols),
+                            reasons=universe.reasons)
+    summary["universe"] = list(universe.symbols)
+    for strategy in strategies:
+        if strategy.config.strategy_id == "CARRY":
+            strategy.config.universe = universe.symbols
+
     # 6. Reallocate. Capital is the desk's only reward signal, so this runs
     #    before anyone is asked for proposals -- a fired strategy should not get
     #    the chance to propose, and a promoted one should feel it this cycle.
@@ -287,7 +319,51 @@ def run_cycle(
             log.warning("%s could not propose: %s", strategy.config.strategy_id, exc.stderr[:120])
             continue
 
-        for proposal in proposals:
+        # The red team argues against each proposal before capital is
+        # committed. It can only ever remove a trade, so a confused answer
+        # costs an opportunity rather than creating a position.
+        verdicts = [
+            red_team(agent, proposal.rationale, {
+                "underlying": proposal.underlying,
+                "structure_legs": len(proposal.legs),
+                "net_price": proposal.net_price,
+                "posture_today": regime.posture,
+            })
+            for proposal in proposals
+        ]
+        # Bounded: however strongly it objects, one agent may veto at most half
+        # of a cycle. Observed live killing 100% of proposals, textbook condors
+        # included -- and a desk that never trades looks exactly like a desk
+        # with nothing to do.
+        standing = apply_kill_budget(verdicts)
+
+        survivors = []
+        for proposal, verdict, killed in zip(proposals, verdicts, standing):
+            if killed:
+                summary["red_team_kills"] += 1
+                log.warning("RED TEAM killed %s %s: %s",
+                            proposal.strategy_id, proposal.underlying, verdict.objection)
+                warden.audit.record(
+                    "red_team_kill", strategy=proposal.strategy_id,
+                    underlying=proposal.underlying, objection=verdict.objection,
+                    severity=verdict.severity, rationale=proposal.rationale,
+                )
+                continue
+            survivors.append(proposal)
+
+        # The portfolio manager ranks what survived and assigns conviction,
+        # which scales size only DOWNWARD from what the Warden already permits.
+        convictions = rank_proposals(agent, [p.rationale for p in survivors])
+        ordered = sorted(convictions, key=lambda c: -c.conviction)
+
+        for choice in ordered:
+            proposal = survivors[choice.index]
+            if choice.conviction < 1.0 and proposal.qty > 1:
+                sized = max(1, int(proposal.qty * choice.conviction))
+                if sized != proposal.qty:
+                    log.info("PM sized %s %s to %d/%d: %s", proposal.strategy_id,
+                             proposal.underlying, sized, proposal.qty, choice.reason)
+                    proposal = replace(proposal, qty=sized)
             outcome = _submit_if_approved(cli, md, warden, state, book, proposal, dry_run=dry_run)
             if outcome == "vetoed":
                 summary["vetoed"] += 1
@@ -299,6 +375,54 @@ def run_cycle(
 
     state.save()
     return summary
+
+
+def _market_conditions(md: MarketData, state: DeskState, book: BookState) -> dict:
+    """What the regime agent is shown. Described facts, not raw prices."""
+    try:
+        spot = md.spot("SPY")
+        chain = md.chain("SPY", min_dte=21, max_dte=45, strike_band=0.05, spot=spot)
+        ivs = [s.implied_volatility for s in chain.values() if s.implied_volatility]
+        atm_iv = sum(ivs) / len(ivs) if ivs else 0.0
+        bars = md.daily_bars("SPY", lookback_days=90)
+        realised = realized_vol(bars)
+        return {
+            "SPY spot": f"{spot:.2f}",
+            "SPY 30d implied vol": f"{atm_iv:.1%}",
+            "SPY realised vol (60d)": f"{realised:.1%}",
+            "implied / realised": f"{(atm_iv / realised):.2f}x" if realised else "n/a",
+            "book drawdown": f"{book.drawdown_pct:.1%}",
+            "open risk": f"${book.total_open_risk:,.0f} of ${book.equity:,.0f}",
+        }
+    except Exception as exc:  # noqa: BLE001 - the agent can reason without this
+        log.warning("could not build market conditions: %s", exc)
+        return {}
+
+
+def _candidate_market(md: MarketData) -> list[dict]:
+    """One row per candidate the scout may choose from."""
+    from .agents import TRADEABLE_UNIVERSE
+
+    rows = []
+    for symbol in TRADEABLE_UNIVERSE[:10]:
+        try:
+            spot = md.spot(symbol)
+            if spot <= 0:
+                continue
+            chain = md.chain(symbol, min_dte=21, max_dte=45, strike_band=0.05, spot=spot)
+            ivs = [s.implied_volatility for s in chain.values() if s.implied_volatility]
+            if not ivs:
+                continue
+            iv = sum(ivs) / len(ivs)
+            realised = realized_vol(md.daily_bars(symbol, lookback_days=90))
+            rows.append({
+                "symbol": symbol, "spot": spot, "iv": iv,
+                "realised_vol": realised,
+                "iv_premium": (iv / realised) if realised else 0.0,
+            })
+        except Exception:  # noqa: BLE001 - one bad name must not stop the scan
+            continue
+    return rows
 
 
 def _submit_if_approved(
