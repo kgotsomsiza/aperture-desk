@@ -36,7 +36,10 @@ class StrategyConfig:
     min_credit_to_width: float = 0.15
     take_profit_pct: float = 0.50  # close at 50% of max profit
     stop_loss_multiple: float = 2.0  # exit at 2x the credit received
-    slippage: float = 0.05  # price concession per structure, in dollars
+    slippage: float = 0.05  # minimum concession per structure, in dollars
+    # How far through the structure's own half-spread to reach for a fill.
+    # Set by execution.adapt each cycle from observed fills, not by hand.
+    aggression: float = 0.60
     # Sized just inside the Warden's own single-trade cap. Without this a
     # strategy happily proposes its whole budget as one structure and every
     # proposal is vetoed -- correct, but the desk never trades.
@@ -130,6 +133,7 @@ def build_vertical(
     slippage: float,
     rationale: str,
     credit: bool = True,
+    aggression: float = 0.60,
 ) -> Proposal | None:
     """Two-leg vertical spread, sized to the budget."""
     if not (short_leg.is_priceable and long_leg.is_priceable):
@@ -142,7 +146,7 @@ def build_vertical(
         if credit
         else [(long_leg, Side.BUY), (short_leg, Side.SELL)]
     )
-    price = concede(structure_price(pairs), slippage, structure_half_spread(pairs))
+    price = concede(structure_price(pairs), slippage, structure_half_spread(pairs), aggression)
 
     probe = Proposal(
         strategy_id=strategy_id,
@@ -180,6 +184,7 @@ def build_iron_condor(
     budget: float,
     slippage: float,
     rationale: str,
+    aggression: float = 0.60,
 ) -> Proposal | None:
     """Four-leg iron condor — Alpaca's maximum leg count, and the ballast workhorse."""
     legs = [
@@ -195,7 +200,7 @@ def build_iron_condor(
     if not (long_put.strike < short_put.strike < short_call.strike < long_call.strike):
         return None
 
-    price = concede(structure_price(legs), slippage, structure_half_spread(legs))
+    price = concede(structure_price(legs), slippage, structure_half_spread(legs), aggression)
     probe = Proposal(
         strategy_id=strategy_id,
         underlying=underlying,
@@ -230,6 +235,7 @@ def build_long_strangle(
     budget: float,
     slippage: float,
     rationale: str,
+    aggression: float = 0.60,
 ) -> Proposal | None:
     """Long call plus long put — the convex sleeve's basic shape.
 
@@ -239,7 +245,7 @@ def build_long_strangle(
     if not (call.is_priceable and put.is_priceable):
         return None
     legs = [(call, Side.BUY), (put, Side.BUY)]
-    price = concede(structure_price(legs), slippage, structure_half_spread(legs))
+    price = concede(structure_price(legs), slippage, structure_half_spread(legs), aggression)
     if price <= 0:
         return None
 

@@ -183,6 +183,7 @@ class DriftStrategy:
             underlying=event.symbol,
             budget=budget,
             slippage=self.config.slippage,
+            aggression=self.config.aggression,
             rationale=rationale,
             credit=False,
         )

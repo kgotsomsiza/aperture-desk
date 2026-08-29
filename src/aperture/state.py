@@ -87,6 +87,10 @@ class DeskState:
     # Hash of the account this ledger was created against. Only the hash: the
     # account number is a submission-form value, not a file value.
     account_fingerprint: str = ""
+    # How far through the half-spread the desk currently reaches for a
+    # fill. Learned from observed outcomes; persisted so a restart does
+    # not throw away what a whole session taught it.
+    aggression: float = 0.60
     open_trades: dict[str, OpenTrade] = field(default_factory=dict)
     closed: list[dict[str, Any]] = field(default_factory=list)
     allocations: dict[str, float] = field(default_factory=dict)
@@ -119,6 +123,7 @@ class DeskState:
             day_stamp=raw.get("day_stamp", ""),
             start_equity=raw.get("start_equity", 0.0),
             account_fingerprint=raw.get("account_fingerprint", ""),
+            aggression=float(raw.get("aggression", 0.60)),
             open_trades=trades,
             closed=raw.get("closed") or [],
             allocations=raw.get("allocations") or {},
@@ -139,6 +144,7 @@ class DeskState:
             "day_stamp": self.day_stamp,
             "start_equity": self.start_equity,
             "account_fingerprint": self.account_fingerprint,
+            "aggression": self.aggression,
             "open_trades": {k: asdict(v) for k, v in self.open_trades.items()},
             "closed": self.closed,
             "allocations": self.allocations,

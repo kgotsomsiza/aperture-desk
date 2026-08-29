@@ -116,6 +116,7 @@ class CarryStrategy:
             underlying=underlying,
             budget=budget,
             slippage=self.config.slippage,
+            aggression=self.config.aggression,
             rationale=rationale,
         )
         if proposal is None:

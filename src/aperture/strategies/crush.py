@@ -169,6 +169,7 @@ class CrushStrategy:
             underlying=comparison.underlying,
             budget=budget,
             slippage=self.config.slippage,
+            aggression=self.config.aggression,
             rationale=f"SELL event premium - {comparison.explain()}",
         )
         if proposal is None or not credit_to_width_ok(proposal, self.config.min_credit_to_width):
@@ -191,6 +192,7 @@ class CrushStrategy:
             underlying=comparison.underlying,
             budget=budget,
             slippage=self.config.slippage,
+            aggression=self.config.aggression,
             rationale=f"BUY event premium - {comparison.explain()}",
         )
 

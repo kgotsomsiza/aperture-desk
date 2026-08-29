@@ -32,6 +32,7 @@ from .allocator import Allocator, observe, summarise
 from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side, parse_occ
 from .earnings import EarningsCalendar
+from .execution import adapt, clamp, measure_fills
 from .identity import WrongAccountError, check as check_account
 from .marketdata import MarketData, Snapshot
 from .contracts import PositionIntent
@@ -148,7 +149,8 @@ def run_cycle(
 ) -> dict:
     now = datetime.now(ET)
     summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0,
-               "breached": None, "flattening": False, "fired": []}
+               "breached": None, "flattening": False, "fired": [],
+               "aggression": None, "fill_rate": None}
 
     clock = cli.clock()
     if not clock.get("is_open"):
@@ -215,7 +217,32 @@ def run_cycle(
     # 4. Exits before entries: free capital this cycle, and always allow an exit.
     summary["closed"] += manage_exits(cli, md, state, warden, dry_run=dry_run)
 
-    # 5. Reallocate. Capital is the desk's only reward signal, so this runs
+    # 5. Learn how hard it has to push to get filled. A desk that keeps
+    #    offering prices the market will not meet is not trading, however busy
+    #    its log looks -- and nobody is watching a dashboard to notice.
+    try:
+        report = measure_fills(cli.orders(status="all"))
+        learned, why = adapt(state.aggression, report)
+        if abs(learned - state.aggression) > 1e-9:
+            log.info("execution: %s", why)
+            warden.audit.record(
+                "execution_adapted",
+                previous=round(state.aggression, 3),
+                aggression=round(learned, 3),
+                filled=report.filled,
+                unfilled=report.unfilled,
+                reason=why,
+            )
+            state.aggression = learned
+        summary["aggression"] = round(state.aggression, 3)
+        summary["fill_rate"] = round(report.rate, 3)
+    except AlpacaCliError as exc:
+        log.warning("could not measure fills: %s", exc.stderr[:120])
+
+    for strategy in strategies:
+        strategy.config.aggression = clamp(state.aggression)
+
+    # 6. Reallocate. Capital is the desk's only reward signal, so this runs
     #    before anyone is asked for proposals -- a fired strategy should not get
     #    the chance to propose, and a promoted one should feel it this cycle.
     allocations = Allocator().allocate(
@@ -246,7 +273,7 @@ def run_cycle(
         )
         state.allocations = current
 
-    # 6-8. Propose, gate, submit.
+    # 7-9. Propose, gate, submit.
     book = build_book(cli, state, now)  # refresh after any exits
     for strategy in strategies:
         if strategy.config.strategy_id in fired:

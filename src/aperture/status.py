@@ -97,7 +97,7 @@ def fill_section(cli: AlpacaCLI) -> None:
         print()
         print("  ! Below 55%. The desk is asking for prices the market is not")
         print("    meeting, so it is deploying less capital than it intends.")
-        print("    Fix: raise `aggression` in strategies/base.concede.")
+        print("    The desk adjusts this itself each cycle -- no action needed.")
     elif total >= 5:
         print("  ok Healthy. Most of what it decides to do actually happens.")
 
