@@ -40,6 +40,7 @@ from .execution import adapt, clamp, measure_fills
 from .identity import WrongAccountError, check as check_account
 from .llm import LLMProvider, NullProvider
 from .marketdata import MarketData, Snapshot, realized_vol
+from .mcp_research import enrich, fetch_brief
 from .contracts import PositionIntent
 from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
 from .state import DeskState, audit_path_for, OpenTrade
@@ -157,7 +158,8 @@ def run_cycle(
     summary = {"submitted": 0, "approved": 0, "vetoed": 0, "closed": 0,
                "breached": None, "flattening": False, "fired": [],
                "aggression": None, "fill_rate": None,
-               "posture": None, "universe": [], "red_team_kills": 0}
+               "posture": None, "universe": [], "red_team_kills": 0,
+               "research_source": None}
 
     clock = cli.clock()
     if not clock.get("is_open"):
@@ -264,7 +266,20 @@ def run_cycle(
         )
     summary["posture"] = regime.posture
 
-    universe = choose_universe(agent, _candidate_market(md), default=carry.DEFAULT_CONFIG.universe)
+    # The agents look at the market through Alpaca's MCP server -- the surface
+    # built for an agent to see through -- while the CLI stays the hands. MCP
+    # also reaches news, which the CLI path never gave the desk at all.
+    candidates = _candidate_market(md)
+    brief = fetch_brief([row["symbol"] for row in candidates])
+    if brief.ok:
+        candidates = enrich(candidates, brief)
+        log.info("MCP research: %d snapshots, headlines for %d names",
+                 len(brief.snapshots), len(brief.headlines))
+        warden.audit.record("mcp_research", source=brief.source,
+                            symbols=sorted(brief.headlines))
+    summary["research_source"] = brief.source
+
+    universe = choose_universe(agent, candidates, default=carry.DEFAULT_CONFIG.universe)
     if universe.decided_by == "scout":
         log.info("scout picked %s", ", ".join(universe.symbols))
         warden.audit.record("universe", symbols=list(universe.symbols),
