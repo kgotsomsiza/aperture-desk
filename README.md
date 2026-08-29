@@ -131,6 +131,32 @@ All limits below are Python, not prompts:
 
 The Warden also rejects uncovered payoff, mixed expiries, malformed leg ratios, stale or missing quotes, insufficient depth, excessive strategy budget, off-hours entries, and duplicate structures. Closing and emergency de-risking remain available when new entries are halted.
 
+## Pre-event work, disclosed
+
+Alpaca's FAQ permits setting up infrastructure and boilerplate before kickoff
+and requires that it be disclosed. This is that disclosure.
+
+The hackathon opened Friday 28 August at 09:30 ET. Ten commits predate it,
+beginning 27 Aug 15:25 with *baseline: risk engine, CLI spine, preflight*. They cover the risk engine, the Alpaca
+CLI wrapper, preflight checks, and project scaffolding — the deterministic
+foundation, built so that the event itself could be spent on the agent
+workflow that is actually being judged.
+
+Everything that makes this an *agent* desk was built during the event: the four
+agents and their bounds, MCP research, adaptive execution, the allocator's
+evidence loop, the research lab, the dashboard, and the consistency checks.
+
+No pre-existing private library is depended on. The repository is public and its
+full history is inspectable.
+
+## On SDKs
+
+The FAQ asks entrants who use an SDK to explain why and to prefer the official
+ones. **This desk uses no SDK.** Orders, account state and market data go
+through the official Alpaca CLI; agent research goes through the official Alpaca
+MCP server. `alpaca-py` appears nowhere in `src/` — the MCP server runs in its
+own isolated environment via `uvx` and brings its own dependencies.
+
 ## Technology
 
 - **Alpaca Trading API through the official Alpaca CLI** for account state, market data, option history, orders, and atomic multi-leg execution.
@@ -187,7 +213,7 @@ npm test
 npm run check
 ```
 
-The current suite contains 302 Python tests and 6 Worker-runtime tests.
+The current suite contains 304 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 

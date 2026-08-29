@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -914,28 +915,40 @@ def test_close_is_persisted_before_an_uncertain_submission(tmp_path):
 
 
 def test_scoring_window_matches_alpacas_published_timeline():
-    from aperture.loop import FLATTEN_FROM, SCORING_CLOSE, SCORING_OPEN, DEADLINE
+    """The judged moment is stated exactly: "total equity as of EOD Thursday
+    Sep 3rd". The window nominally runs to Friday's opening bell, but aiming the
+    desk at Friday would have it opening positions on Thursday morning as though
+    another session remained."""
+    from aperture.loop import SCORING_CLOSE, SCORING_OPEN, DEADLINE
 
-    # Mon 31 Aug 09:30 ET -> Fri 4 Sep 09:30 ET. Four sessions, and it ends at
-    # the opening bell, not at the submission deadline.
     assert (SCORING_OPEN.month, SCORING_OPEN.day, SCORING_OPEN.hour, SCORING_OPEN.minute) == (8, 31, 9, 30)
-    assert (SCORING_CLOSE.month, SCORING_CLOSE.day, SCORING_CLOSE.hour, SCORING_CLOSE.minute) == (9, 4, 9, 30)
+    assert (SCORING_CLOSE.month, SCORING_CLOSE.day) == (9, 3)
+    assert (SCORING_CLOSE.hour, SCORING_CLOSE.minute) == (16, 0)  # Thursday's close
     assert DEADLINE == SCORING_CLOSE
-    # Flatten during Thursday's session: the last full one before the snapshot,
-    # with hours of liquid market left to get out in.
-    assert (FLATTEN_FROM.month, FLATTEN_FROM.day) == (9, 3)
-    assert FLATTEN_FROM < SCORING_CLOSE
-    assert (SCORING_CLOSE - FLATTEN_FROM) > timedelta(hours=12)
 
 
-def test_risk_appetite_is_already_throttled_at_the_flatten_point():
-    """The flatten phase is what actually stops trading; the tournament clock is
-    a smooth ramp behind it, not the thing being relied on."""
-    from aperture.loop import FLATTEN_FROM, SCORING_CLOSE, SCORING_OPEN
+def test_the_desk_does_not_liquidate_into_the_measurement():
+    """Judging uses total equity, not cash. Crossing the spread on every open
+    structure would convert a mid-market mark into slightly less cash, for
+    certain, to remove an uncertainty that is unbiased and smaller."""
+    import aperture.loop as loop
+
+    assert not hasattr(loop, "FLATTEN_FROM")
+    source = (pathlib.Path(loop.__file__)).read_text(encoding="utf-8")
+    endgame = source[source.index("# 2. Past the measurement"):source.index("# 3. Circuit breakers")]
+    assert "_flatten(" not in endgame
+
+
+def test_risk_appetite_throttles_itself_toward_the_measurement():
+    """With no blanket liquidation, the tournament clock *is* the endgame: it
+    has to stop the desk opening positions on its own."""
+    from aperture.loop import SCORING_CLOSE, SCORING_OPEN
     from aperture.risk import tournament_risk_multiplier
 
     early = tournament_risk_multiplier(SCORING_OPEN, SCORING_CLOSE, 100_000, 100_000)
-    late = tournament_risk_multiplier(FLATTEN_FROM, SCORING_CLOSE, 106_000, 100_000)
+    late = tournament_risk_multiplier(
+        SCORING_CLOSE - timedelta(hours=20), SCORING_CLOSE, 106_000, 100_000
+    )
     assert late <= 0.5
     assert late < early
 
@@ -944,6 +957,19 @@ def test_risk_appetite_is_already_throttled_at_the_flatten_point():
         SCORING_CLOSE - timedelta(hours=2), SCORING_CLOSE, 106_000, 100_000
     )
     assert final == 0.0
+
+
+def test_being_behind_near_the_end_still_allows_bounded_variance():
+    """Finishing 20th and finishing 40th pay the same, so a desk that is behind
+    should not protect a result it does not have -- but only through structures
+    the Warden has already bounded."""
+    from aperture.loop import SCORING_CLOSE
+    from aperture.risk import tournament_risk_multiplier
+
+    behind = tournament_risk_multiplier(
+        SCORING_CLOSE - timedelta(hours=2), SCORING_CLOSE, 97_000, 100_000
+    )
+    assert 0.0 < behind <= 0.5
 
 
 def test_tournament_clock_still_leans_in_early_in_the_window():

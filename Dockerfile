@@ -21,7 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir mcp alpaca-py httpx numpy pandas pydantic \
+RUN pip install --no-cache-dir mcp httpx numpy pandas pydantic \
     python-dotenv rich scipy openai yfinance
 
 COPY src/ ./src/

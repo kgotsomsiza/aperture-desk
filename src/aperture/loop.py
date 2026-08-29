@@ -60,24 +60,47 @@ log = logging.getLogger("aperture")
 # already fails in, since it can only ever remove a trade.
 RED_TEAM_BUDGET_SECONDS = 90.0
 
-# Official timeline, per Alpaca's published guidelines.
+# Official timeline, per Alpaca's published guidelines and FAQ.
 #
-# The scored window is FOUR sessions, not six, and it ends at the *opening bell*
-# on 4 September rather than at the submission deadline. Judging takes a snapshot
-# of total account equity at that moment -- equity, not cash, so open positions
-# are marked to market and count.
+# The window nominally runs to the opening bell on 4 September, but the number
+# that is actually judged is stated precisely: "We will be looking at the
+# portfolio's total equity as of EOD Thursday Sep 3rd."
+#
+# So the desk's real deadline is Thursday's *closing* bell, not Friday's opening
+# one. Roughly seventeen hours earlier than the nominal close, and that gap
+# matters: the tournament risk multiplier scales appetite by time remaining, and
+# aiming it at Friday would have the desk still opening positions on Thursday
+# morning as though it had another session to let them work.
+#
+# Judging uses total account equity, not cash balance -- Alpaca says so twice,
+# in the guidelines and again in the FAQ -- so open positions are marked to
+# market and count in full.
 SCORING_OPEN = datetime(2026, 8, 31, 9, 30, tzinfo=ET)
-SCORING_CLOSE = datetime(2026, 9, 4, 9, 30, tzinfo=ET)
+SCORING_CLOSE = datetime(2026, 9, 3, 16, 0, tzinfo=ET)  # EOD Thursday: the measured moment
 DEADLINE = SCORING_CLOSE  # what the tournament clock scales against
 
-# Everything is closed during Thursday afternoon -- the last full session before
-# the snapshot, leaving two hours of liquid market to get out in.
+# The desk used to flatten everything on Thursday afternoon. That was the right
+# call against the hazard it was designed for and is the wrong call now.
 #
-# The snapshot lands one hour after the September jobs report and moments after
-# the opening bell, when option marks are widest and least reliable. A position
-# held through that is a bet on a macro print, priced at the worst quotes of the
-# week. Being flat converts the result into cash, which cannot be re-marked.
-FLATTEN_FROM = datetime(2026, 9, 3, 14, 0, tzinfo=ET)
+# The reasoning was: the snapshot lands moments after Friday's opening bell, one
+# hour after the September jobs report, when option marks are widest and least
+# reliable -- so convert to cash, which cannot be re-marked. Sound, given that
+# premise.
+#
+# The premise is gone. The measurement is EOD Thursday: a *closing* mark, the
+# most reliable print of the session, with no macro release and no opening
+# auction between the desk and the number. Flattening into it would mean
+# crossing the bid-ask on every open structure to convert a mid-market mark into
+# slightly less cash. On a book of defined-risk spreads that is a certain cost
+# of roughly half a percent of equity, paid to remove uncertainty that is
+# unbiased and much smaller. It is also the manoeuvre most likely to go wrong:
+# this desk's measured weakness is its fill rate, and a half-completed flatten
+# is worse than either holding or being flat.
+#
+# So the endgame is now expressed through the tournament risk multiplier, which
+# already stops opening new positions as the deadline approaches, rather than
+# through a blanket liquidation. Exits, circuit breakers and the kill switch are
+# untouched: those still close positions, and should.
 
 TERMINAL_ORDER_STATUSES = {"canceled", "expired", "rejected"}
 
@@ -208,15 +231,13 @@ def run_cycle(
         state.save()
         return summary
 
-    # 2. Endgame: past the flatten point, the only job is to be in cash.
-    if now >= FLATTEN_FROM:
+    # 2. Past the measurement there is nothing left to play for. Stop opening,
+    #    and stop paying spreads to rearrange a book nobody will look at again.
+    if now >= DEADLINE:
         summary["flattening"] = True
-        log.warning(
-            "endgame: past %s, closing everything and opening nothing",
-            FLATTEN_FROM.strftime("%d %b %H:%M ET"),
-        )
+        log.warning("past the measured close (%s); standing down",
+                    DEADLINE.strftime("%d %b %H:%M ET"))
         _cancel_pending_entries(cli, state, warden, dry_run=dry_run)
-        summary["closed"] += _flatten(cli, md, state, warden, dry_run=dry_run)
         state.save()
         return summary
 
