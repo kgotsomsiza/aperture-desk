@@ -4,7 +4,8 @@ Why the CLI and not the SDK for execution: the CLI is built for exactly this
 shape of workload. It emits structured JSON, returns meaningful exit codes,
 retries rate limits on its own, takes ``--client-order-id`` for idempotency and
 ``--dry-run`` for a free pre-trade check, and it needs no language model in the
-loop to move money. The MCP server is the desk's brain; this is its hands.
+loop to move money. The strategy and research layers are the desk's brain; this
+is their deliberately narrow set of hands.
 
 Verified against alpaca CLI v0.0.13, whose ``order submit`` exposes ``--legs``
 and ``--order-class mleg`` natively (the docs site does not mention this).
