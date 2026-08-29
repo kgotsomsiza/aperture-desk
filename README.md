@@ -19,14 +19,26 @@ Aperture is built for the [Alpaca AI Trading Agents Hackathon](https://lablab.ai
 
 | Component | Allowed to do | Explicitly cannot do |
 |---|---|---|
-| Featherless AI | Prioritize predeclared one-knob experiments; explain completed evidence | See backtest outcomes before selection; promote a candidate; place an order; change risk limits |
+| **Scout agent** | Choose today's tradeable universe from live IV, realised vol and event proximity | Name anything outside a vetted liquid list |
+| **Regime agent** | Set the desk's posture: sell premium, buy convexity, balance, or stand down | Move sleeve budgets outside 0.35x-1.35x |
+| **Red Team agent** | Argue against every proposal and kill the fragile ones | Kill more than half a cycle, or kill on anything below high severity |
+| **Portfolio Manager agent** | Rank surviving proposals and set conviction | Size *up*; conviction only scales down inside the Warden's cap |
+| **Research agent** | Prioritise predeclared one-knob experiments; explain completed evidence | See backtest outcomes before selection; promote a candidate |
+| Any agent | Decide what to trade and whether to proceed | Emit a strike, quantity or price; place an order; change a risk limit |
 | Strategy roster | Form CARRY, CRUSH, DRIFT, and promoted-lab proposals | Bypass the Warden or spend outside its allocation |
 | Research gate | Backtest real historical option bars; enforce holdout, minimum evidence, incumbent improvement, and a trials-aware threshold | Relax its own bar because a narrative sounds persuasive |
 | Risk Warden | Compute worst-case payoff, size, veto, halt entries, and trigger flattening | Call an LLM or infer missing market data |
 | Alpaca CLI | Read market/account state and submit idempotent `mleg` orders | Turn submission acceptance into a synthetic fill |
 | Cloudflare Worker | Accept a redacted snapshot and serve the public evidence surface | Receive broker credentials or control trading |
 
-The language model proposes. Code disposes.
+**Agents judge. Code enforces.**
+
+Language models are poor at arithmetic, strike selection and OCC symbols, and
+good at reading a situation and arguing about it, so the boundary is drawn where
+their competence actually is. An agent that killed a trade because earnings fall
+inside the expiry did something no gate in this repo can do; a gate that refused
+a structure for being three cents too wide did something no model should be
+asked to.
 
 ## Architecture
 
@@ -116,7 +128,13 @@ The Warden also rejects uncovered payoff, mixed expiries, malformed leg ratios, 
 ## Technology
 
 - **Alpaca Trading API through the official Alpaca CLI** for account state, market data, option history, orders, and atomic multi-leg execution.
-- **Featherless AI** with `Qwen/Qwen3-Next-80B-A3B-Instruct` for fast hypothesis selection and `moonshotai/Kimi-K2-Instruct` for post-evidence explanation. Provider failures fall back without weakening risk controls.
+- **Featherless AI** runs the desk's judgement: `moonshotai/Kimi-K2-Instruct` for
+  regime and universe calls, `Qwen/Qwen3-Next-80B-A3B-Instruct` for the
+  high-frequency red-team pass, with automatic fallback between them when a
+  shared model is busy. Agents decide *what* the desk does; deterministic code
+  decides whether it is permitted and computes every strike, size and price.
+  Every agent has a deterministic fallback, so a provider outage degrades the
+  desk to its designed behaviour rather than stopping it.
 - **Python 3.11+** for strategies, simulation, promotion, allocation, reconciliation, and risk authority.
 - **Cloudflare Workers, Static Assets, and KV** for the public desk. Publishing is bearer-authenticated, schema-validated, size-bounded, and isolated from trading.
 
