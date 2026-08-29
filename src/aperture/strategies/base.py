@@ -80,14 +80,33 @@ def structure_price(legs: Sequence[tuple[Snapshot, Side]]) -> float:
     return total
 
 
-def concede(price: float, slippage: float) -> float:
+def structure_half_spread(legs: Sequence[tuple[Snapshot, Side]]) -> float:
+    """Half the structure's combined bid-ask width.
+
+    Each leg contributes its own half-spread regardless of side, because closing
+    the distance to a fill costs the same whether a leg is being bought or sold.
+    """
+    return sum(max(snapshot.ask - snapshot.bid, 0.0) / 2 for snapshot, _ in legs)
+
+
+def concede(price: float, slippage: float, half_spread: float = 0.0,
+            aggression: float = 0.6) -> float:
     """Shift a limit price toward the market to buy fill probability.
 
     Works in both directions without a branch: a debit (positive) rises, and a
     credit (negative) shrinks toward zero. Both mean "accept a slightly worse
     price", which is what makes a marketable limit fill.
+
+    The concession scales with the structure's own spread. A flat five cents is
+    meaningless on a four-leg condor whose legs are quoted fifteen to forty
+    percent wide -- that is asking for mid and hoping. Measured on the 28 August
+    practice session: 31 multi-leg orders, 12 filled. Structures asking 6.16,
+    6.32, 8.03 and 8.11 all expired unfilled, while the one that asked 8.16
+    filled at 8.15. The flat nickel sat right on the boundary and usually missed,
+    so the desk deployed about two fifths of the capital it intended to.
     """
-    return round(price + abs(slippage), 2)
+    step = max(abs(slippage), aggression * max(half_spread, 0.0))
+    return round(price + step, 2)
 
 
 def size_to_budget(max_loss_per_unit: float, budget: float, cap: int = 50) -> int:
@@ -123,7 +142,7 @@ def build_vertical(
         if credit
         else [(long_leg, Side.BUY), (short_leg, Side.SELL)]
     )
-    price = concede(structure_price(pairs), slippage)
+    price = concede(structure_price(pairs), slippage, structure_half_spread(pairs))
 
     probe = Proposal(
         strategy_id=strategy_id,
@@ -176,7 +195,7 @@ def build_iron_condor(
     if not (long_put.strike < short_put.strike < short_call.strike < long_call.strike):
         return None
 
-    price = concede(structure_price(legs), slippage)
+    price = concede(structure_price(legs), slippage, structure_half_spread(legs))
     probe = Proposal(
         strategy_id=strategy_id,
         underlying=underlying,
@@ -220,7 +239,7 @@ def build_long_strangle(
     if not (call.is_priceable and put.is_priceable):
         return None
     legs = [(call, Side.BUY), (put, Side.BUY)]
-    price = concede(structure_price(legs), slippage)
+    price = concede(structure_price(legs), slippage, structure_half_spread(legs))
     if price <= 0:
         return None
 

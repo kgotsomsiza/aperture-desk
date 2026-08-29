@@ -604,3 +604,64 @@ def test_no_keys_means_deterministic_only(monkeypatch):
     monkeypatch.delenv("FEATHERLESS_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert isinstance(build_provider(), NullProvider)
+
+
+# --------------------------------------------------------------------------- #
+# Fill realism: measured on the 28 August practice session
+# --------------------------------------------------------------------------- #
+
+
+def test_half_spread_sums_every_leg_regardless_of_side():
+    from aperture.strategies.base import structure_half_spread
+
+    legs = [
+        (snap(625, Right.PUT, 0.90, 1.10), Side.BUY),    # 0.20 wide -> 0.10
+        (snap(630, Right.PUT, 2.40, 2.60), Side.SELL),   # 0.20 wide -> 0.10
+    ]
+    assert structure_half_spread(legs) == pytest.approx(0.20)
+
+
+def test_concession_scales_with_the_spread_not_a_flat_nickel():
+    """A nickel against a four-leg structure quoted 15-40% wide is asking for mid
+    and hoping. On 28 Aug that missed on 19 of 31 orders."""
+    from aperture.strategies.base import concede
+
+    tight = concede(-1.50, slippage=0.05, half_spread=0.04)
+    wide = concede(-1.50, slippage=0.05, half_spread=0.60)
+    assert tight == pytest.approx(-1.45)          # floor still applies
+    assert wide > tight                            # concedes more when it must
+    assert wide == pytest.approx(-1.50 + 0.36)     # 0.6 x the half-spread
+
+
+def test_concession_never_goes_below_the_floor():
+    from aperture.strategies.base import concede
+
+    assert concede(2.00, slippage=0.05, half_spread=0.0) == pytest.approx(2.05)
+    assert concede(2.00, slippage=0.05, half_spread=-1.0) == pytest.approx(2.05)
+
+
+def test_concession_still_works_in_both_directions():
+    from aperture.strategies.base import concede
+
+    # A credit shrinks toward zero; a debit grows. Both mean "accept worse".
+    assert concede(-1.50, 0.05, 0.40) > -1.50
+    assert concede(2.00, 0.05, 0.40) > 2.00
+
+
+def test_a_wide_condor_prices_more_aggressively_than_a_tight_one():
+    from aperture.strategies.base import build_iron_condor
+
+    def condor(width: float):
+        return build_iron_condor(
+            short_put=snap(630, Right.PUT, 2.50 - width / 2, 2.50 + width / 2),
+            long_put=snap(625, Right.PUT, 1.00 - width / 2, 1.00 + width / 2),
+            short_call=snap(660, Right.CALL, 2.50 - width / 2, 2.50 + width / 2),
+            long_call=snap(665, Right.CALL, 1.00 - width / 2, 1.00 + width / 2),
+            strategy_id="CARRY", underlying="SPY", budget=5_000.0,
+            slippage=0.05, rationale="t",
+        )
+
+    tight, wide = condor(0.10), condor(0.60)
+    assert tight is not None and wide is not None
+    # Both are credits (negative); the wide one gives up more of it to get filled.
+    assert wide.net_price > tight.net_price
