@@ -293,6 +293,14 @@ def run_cycle(
         warden.audit.record("universe", symbols=list(universe.symbols),
                             reasons=universe.reasons)
     summary["universe"] = list(universe.symbols)
+    # The posture is the single most legible thing the desk decides each day,
+    # and until now it existed only in memory. Record it so both the operator's
+    # status view and the public tape can show what stance was taken and why.
+    warden.audit.record(
+        "posture", posture=regime.posture, confidence=regime.confidence,
+        reason=regime.reason, ballast_tilt=regime.ballast_tilt,
+        convex_tilt=regime.convex_tilt,
+    )
     for strategy in strategies:
         if strategy.config.strategy_id == "CARRY":
             strategy.config.universe = universe.symbols

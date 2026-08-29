@@ -41,7 +41,15 @@ POSITION_FIELDS = (
     "unrealized_plpc",
 )
 
-AUDIT_FIELDS = ("ts", "event", "strategy", "underlying", "summary", "rationale", "reason")
+# Agent reasoning is the point of this desk, so the public tape carries it:
+# which names the scout chose and why, what posture was taken, and the exact
+# objection behind every red team kill. All of these are argument, never
+# identity -- the forbidden-key sweep still runs over the finished snapshot.
+AUDIT_FIELDS = (
+    "ts", "event", "strategy", "underlying", "summary", "rationale", "reason",
+    "symbols", "reasons", "posture", "confidence", "objection", "severity",
+    "source", "unchallenged",
+)
 PUBLIC_MODES = {"demo", "practice", "scoring", "final"}
 
 

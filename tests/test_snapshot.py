@@ -86,3 +86,27 @@ def test_remote_http_failure_is_visible_to_the_runner_boundary():
                 token="test-publisher-value",
                 client=client,
             )
+
+
+# --------------------------------------------------------------------------- #
+# The public tape must carry the argument, not just the verdict
+# --------------------------------------------------------------------------- #
+
+
+def test_agent_reasoning_survives_the_public_projection():
+    """A judge opening the demo URL should see *why* the desk did things. The
+    projection used to keep the event name and drop every field that carried
+    the reasoning, so a red team kill arrived with no objection attached."""
+    from aperture.snapshot import AUDIT_FIELDS
+
+    for field in ("symbols", "reasons", "posture", "objection", "severity", "confidence"):
+        assert field in AUDIT_FIELDS, f"{field} is stripped before it reaches the public"
+
+
+def test_identity_is_still_never_publishable():
+    """Widening the tape must not widen what can leak."""
+    from aperture.snapshot import AUDIT_FIELDS, FORBIDDEN_KEYS
+
+    assert not set(AUDIT_FIELDS) & set(FORBIDDEN_KEYS)
+    for field in ("account_number", "account_id", "api_key", "secret"):
+        assert field not in AUDIT_FIELDS

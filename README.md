@@ -28,6 +28,7 @@ Aperture is built for the [Alpaca AI Trading Agents Hackathon](https://lablab.ai
 | Strategy roster | Form CARRY, CRUSH, DRIFT, and promoted-lab proposals | Bypass the Warden or spend outside its allocation |
 | Research gate | Backtest real historical option bars; enforce holdout, minimum evidence, incumbent improvement, and a trials-aware threshold | Relax its own bar because a narrative sounds persuasive |
 | Risk Warden | Compute worst-case payoff, size, veto, halt entries, and trigger flattening | Call an LLM or infer missing market data |
+| Alpaca MCP server | Show the agents the market: snapshots, chains, movers, and news | Reach execution, or have its output treated as instructions |
 | Alpaca CLI | Read market/account state and submit idempotent `mleg` orders | Turn submission acceptance into a synthetic fill |
 | Cloudflare Worker | Accept a redacted snapshot and serve the public evidence surface | Receive broker credentials or control trading |
 
@@ -76,12 +77,17 @@ The order of operations is part of the safety model:
 1. reconcile the local ledger with broker positions and orders;
 2. evaluate circuit breakers;
 3. manage exits before considering entries;
-4. allocate risk budget from fill-derived evidence;
-5. collect proposals from funded strategies;
-6. run every proposal through every Warden gate;
-7. submit approved structures with deterministic client-order IDs;
-8. poll parent orders and record only confirmed multi-leg fills;
-9. publish a public-safe snapshot in a failure-isolated path.
+4. adapt fill aggression from how the last orders actually settled;
+5. research the market through the MCP server -- snapshots and news;
+6. the scout chooses today's universe and the regime agent sets the posture;
+7. allocate risk budget from fill-derived evidence;
+8. collect proposals from funded strategies;
+9. the red team argues against each proposal and may remove up to half a cycle;
+10. the portfolio manager ranks survivors and assigns conviction;
+11. run every surviving proposal through every Warden gate;
+12. submit approved structures with deterministic client-order IDs;
+13. poll parent orders and record only confirmed multi-leg fills;
+14. publish a public-safe snapshot in a failure-isolated path.
 
 A crash after order acceptance is recoverable: pending reservations retain the client-order identity, and the next cycle recovers the broker order before it can submit again.
 
@@ -128,6 +134,13 @@ The Warden also rejects uncovered payoff, mixed expiries, malformed leg ratios, 
 ## Technology
 
 - **Alpaca Trading API through the official Alpaca CLI** for account state, market data, option history, orders, and atomic multi-leg execution.
+- **Alpaca MCP server** (`uvx alpaca-mcp-server`) as the agents' research
+  surface: stock snapshots and news, the latter unavailable through the CLI
+  path entirely. The server labels its own responses
+  `trust: untrusted_tool_output` and this desk honours that -- headlines are
+  extracted as facts and attached to a symbol, never concatenated into a
+  system prompt. Research is cached and fails open: if MCP is unreachable the
+  desk trades on the CLI picture alone.
 - **Featherless AI** runs the desk's judgement: `moonshotai/Kimi-K2-Instruct` for
   regime and universe calls, `Qwen/Qwen3-Next-80B-A3B-Instruct` for the
   high-frequency red-team pass, with automatic fallback between them when a
@@ -135,7 +148,7 @@ The Warden also rejects uncovered payoff, mixed expiries, malformed leg ratios, 
   decides whether it is permitted and computes every strike, size and price.
   Every agent has a deterministic fallback, so a provider outage degrades the
   desk to its designed behaviour rather than stopping it.
-- **Python 3.11+** for strategies, simulation, promotion, allocation, reconciliation, and risk authority.
+- **Python 3.12** for strategies, simulation, promotion, allocation, reconciliation, and risk authority.
 - **Cloudflare Workers, Static Assets, and KV** for the public desk. Publishing is bearer-authenticated, schema-validated, size-bounded, and isolated from trading.
 
 ## Run locally
@@ -174,7 +187,7 @@ npm test
 npm run check
 ```
 
-The current suite contains 224 Python tests and 6 Worker-runtime tests.
+The current suite contains 288 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 
