@@ -280,8 +280,30 @@ def test_simulator_produces_trades_on_a_workable_history():
 
     result = simulate_condors(history, CondorSpec(short_pct=0.04, width_pct=0.02))
     assert result.n >= 1
+    assert result.diagnostics["trades_opened"] == result.n
     # A flat market should let short premium decay into profit.
     assert result.total_pnl > 0
+
+
+def test_simulator_explains_when_the_daily_tape_cannot_form_both_sides():
+    start = date(2026, 1, 5)
+    expiry = date(2026, 1, 23)
+    history = OptionHistory(
+        underlying="TEST",
+        spot={start + timedelta(days=i): 100.0 for i in range(20)},
+        bars={
+            build_occ("TEST", expiry, Right.CALL, 105): {start: 1.0},
+            build_occ("TEST", expiry, Right.CALL, 110): {start: 0.3},
+            # Puts are listed, but neither printed on the eligible session.
+            build_occ("TEST", expiry, Right.PUT, 95): {},
+            build_occ("TEST", expiry, Right.PUT, 90): {},
+        },
+    )
+
+    result = simulate_condors(history, CondorSpec())
+
+    assert result.n == 0
+    assert result.diagnostics["missing_priceable_side"] >= 1
 
 
 def test_simulator_charges_slippage_adversely_on_both_sides(monkeypatch):

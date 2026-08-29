@@ -482,6 +482,7 @@ def promotion_records(
                 "t_stat": round(result.t_stat, 4),
                 "total_pnl": round(result.total_pnl, 2),
                 "max_drawdown": round(result.max_drawdown, 2),
+                "diagnostics": dict(result.diagnostics),
             },
             "reason": reason,
             "status": "probation",

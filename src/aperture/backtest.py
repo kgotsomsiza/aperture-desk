@@ -117,6 +117,11 @@ class SimulatedTrade:
 class BacktestResult:
     strategy_id: str
     trades: list[SimulatedTrade] = field(default_factory=list)
+    diagnostics: dict[str, int] = field(default_factory=dict)
+
+    def note(self, outcome: str, count: int = 1) -> None:
+        """Count why an otherwise eligible simulation step did not become a trade."""
+        self.diagnostics[outcome] = self.diagnostics.get(outcome, 0) + count
 
     @property
     def n(self) -> int:
@@ -461,7 +466,9 @@ def simulate_condors(
     """
     result = BacktestResult(strategy_id=strategy_id)
     sessions = history.sessions()
+    result.diagnostics["sessions"] = len(sessions)
     if len(sessions) < 10:
+        result.note("insufficient_sessions")
         return result
 
     # A chronological slice can still contain bars for a contract whose expiry
@@ -477,19 +484,38 @@ def simulate_condors(
 
     for today in sessions:
         if open_until and today <= open_until:
+            result.note("position_overlap")
             continue
 
         spot = history.spot[today]
         expiry = _nearest_expiry(expiries, today, spec.dte_target)
         if expiry is None:
+            result.note("no_eligible_expiry")
             continue
 
         legs = _pick_condor(history, expiry, spot, spec, day=today)
         if legs is None:
+            priceable_puts = sum(
+                history.price(symbol, today) is not None
+                for symbol in history.contracts_for(expiry, Right.PUT)
+            )
+            priceable_calls = sum(
+                history.price(symbol, today) is not None
+                for symbol in history.contracts_for(expiry, Right.CALL)
+            )
+            result.note(
+                "missing_priceable_side"
+                if min(priceable_puts, priceable_calls) < 2
+                else "invalid_strike_geometry"
+            )
             continue
 
         entry = _price(history, legs, today)
-        if entry is None or entry >= 0:
+        if entry is None:
+            result.note("incomplete_entry_price")
+            continue
+        if entry >= 0:
+            result.note("not_a_credit")
             continue  # a condor that is not a credit is not this structure
 
         # A credit fill worse than the observed composite mark is closer to
@@ -497,19 +523,23 @@ def simulate_condors(
         # essential; otherwise every simulated round trip gets a free fill.
         entry += spec.slippage
         if entry >= 0:
+            result.note("slippage_erased_credit")
             continue
 
         strikes = [parse_occ(symbol).strike for symbol in legs]
         width = max(strikes[1] - strikes[0], strikes[3] - strikes[2])
         if width <= 0 or (-entry / width) < spec.min_credit_to_width:
+            result.note("credit_below_floor")
             continue
 
         max_loss = _max_loss(legs, entry)
         if max_loss <= 0:
+            result.note("invalid_max_loss")
             continue
 
         exit_day, exit_price, reason = _manage(history, legs, today, expiry, entry, spec)
         if exit_day is None:
+            result.note("no_exit_data")
             continue
 
         result.trades.append(
@@ -519,6 +549,7 @@ def simulate_condors(
                 max_loss=max_loss, reason=reason,
             )
         )
+        result.note("trades_opened")
         open_until = expiry
 
     return result

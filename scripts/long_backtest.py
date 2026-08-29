@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
             "trades": result.n,
             "edge": round(result.edge, 6),
             "t_stat": round(result.t_stat, 4),
+            "diagnostics": dict(result.diagnostics),
             "reason": reason,
         }
         for candidate, result, reason in report.rejected
