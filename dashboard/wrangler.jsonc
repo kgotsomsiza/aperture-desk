@@ -16,7 +16,7 @@
   "kv_namespaces": [
     {
       "binding": "SNAPSHOTS",
-      "id": "00000000000000000000000000000000"
+      "id": "<your-kv-namespace-id>"
     }
   ],
   "observability": {
