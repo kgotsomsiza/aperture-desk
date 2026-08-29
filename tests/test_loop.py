@@ -588,21 +588,30 @@ def test_dry_run_is_not_counted_as_a_veto(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+# A synthetic account number, never a real one. The fixture has to look like a
+# genuine Alpaca identifier for the redaction test to be meaningful, but using
+# an actual account number would publish the very thing the test asserts is
+# never published -- which is exactly what happened once and had to be purged.
+FAKE_ACCOUNT_NUMBER = "PA0FIXTURESNP"
+FIXTURE_ACCOUNT_UUID = "8f3a2b1c-9d4e-4a5b-8c7d-1e2f3a4b5c6d"
+FIXTURE_SHORT_UUID = "8f3a2b1c-9d4e"
+
+
 class FakeCLI:
     """Returns broker payloads that DO contain identifiers, to prove the
     snapshot's allowlist strips them rather than merely not asking for them."""
 
     def account(self):
         return {
-            "id": "8f3a2b1c-9d4e-4a5b-8c7d-1e2f3a4b5c6d",
-            "account_number": "PA0FIXTUREDEV",
+            "id": FIXTURE_ACCOUNT_UUID,
+            "account_number": FAKE_ACCOUNT_NUMBER,
             "equity": "104250.00",
             "cash": "50000.00",
         }
 
     def positions(self):
         return [{
-            "asset_id": "abc-123", "account_id": "8f3a2b1c-9d4e",
+            "asset_id": "abc-123", "account_id": FIXTURE_SHORT_UUID,
             "symbol": "SPY260918P00630000", "qty": "-2",
             "avg_entry_price": "2.50", "current_price": "1.10",
             "market_value": "-220", "unrealized_pl": "280", "unrealized_plpc": "0.56",
@@ -630,8 +639,8 @@ def test_snapshot_strips_account_identifiers(tmp_path):
     import json as _json
     payload = build_snapshot(tmp_path)
     blob = _json.dumps(payload)
-    assert "PA0FIXTUREDEV" not in blob
-    assert "8f3a2b1c" not in blob
+    assert FAKE_ACCOUNT_NUMBER not in blob
+    assert FIXTURE_SHORT_UUID not in blob
     assert "asset_id" not in blob
 
 
@@ -725,16 +734,16 @@ def test_write_refuses_to_publish_a_leak(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-DEV = {"account_number": "PA3DEVDEVDEV1", "equity": "100000"}
-JUDGED = {"account_number": "PA9JUDGEDJUDG", "equity": "100000"}
+DEV = {"account_number": "PA0FIXTUREDEV", "equity": "100000"}
+JUDGED = {"account_number": "PA0FIXTUREJDG", "equity": "100000"}
 
 
 def test_fingerprint_is_stable_and_not_the_account_number():
     from aperture.identity import fingerprint
 
-    a = fingerprint("PA3DEVDEVDEV1")
-    assert a == fingerprint("pa3devdevdev1 ")     # case and whitespace insensitive
-    assert a != fingerprint("PA9JUDGEDJUDG")
+    a = fingerprint("PA0FIXTUREDEV")
+    assert a == fingerprint("pa0fixturedev ")     # case and whitespace insensitive
+    assert a != fingerprint("PA0FIXTUREJDG")
     assert "PA3DEV" not in a                       # the number itself never appears
 
 
@@ -749,7 +758,7 @@ def test_ledger_refuses_a_different_account():
     from aperture.identity import WrongAccountError, check, fingerprint
 
     with pytest.raises(WrongAccountError, match="separate --state file"):
-        check(JUDGED, recorded=fingerprint("PA3DEVDEVDEV1"))
+        check(JUDGED, recorded=fingerprint("PA0FIXTUREDEV"))
 
 
 def test_expected_account_assertion_catches_the_opposite_mistake():
@@ -757,8 +766,8 @@ def test_expected_account_assertion_catches_the_opposite_mistake():
     from aperture.identity import WrongAccountError, check
 
     with pytest.raises(WrongAccountError, match="APERTURE_EXPECT_ACCOUNT names"):
-        check(DEV, recorded=None, expected="PA9JUDGEDJUDG")
-    assert check(DEV, recorded=None, expected="PA3DEVDEVDEV1")
+        check(DEV, recorded=None, expected="PA0FIXTUREJDG")
+    assert check(DEV, recorded=None, expected="PA0FIXTUREDEV")
 
 
 def test_live_trading_requires_naming_the_account():
@@ -778,7 +787,7 @@ def test_missing_account_identifier_is_an_error_not_a_default():
 def test_environment_variable_is_honoured(monkeypatch):
     from aperture.identity import WrongAccountError, check
 
-    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA9JUDGEDJUDG")
+    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA0FIXTUREJDG")
     assert check(JUDGED, recorded=None)
     with pytest.raises(WrongAccountError):
         check(DEV, recorded=None)
@@ -788,11 +797,11 @@ def test_fingerprint_persists_through_the_ledger(tmp_path):
     from aperture.identity import fingerprint
 
     state = DeskState(path=tmp_path / "d.json")
-    state.account_fingerprint = fingerprint("PA3DEVDEVDEV1")
+    state.account_fingerprint = fingerprint("PA0FIXTUREDEV")
     state.save()
-    assert DeskState.load(tmp_path / "d.json").account_fingerprint == fingerprint("PA3DEVDEVDEV1")
+    assert DeskState.load(tmp_path / "d.json").account_fingerprint == fingerprint("PA0FIXTUREDEV")
     # And the raw account number is nowhere in the file.
-    assert "PA3DEVDEVDEV1" not in (tmp_path / "d.json").read_text()
+    assert "PA0FIXTUREDEV" not in (tmp_path / "d.json").read_text()
 
 
 # --------------------------------------------------------------------------- #

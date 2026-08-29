@@ -8,7 +8,7 @@ from aperture.risk import Leg, Proposal
 
 
 class AccountCLI:
-    def __init__(self, equity="100000.00", number="PA9JUDGEDJUDG"):
+    def __init__(self, equity="100000.00", number="PA0FIXTUREJDG"):
         self.payload = {
             "account_number": number,
             "equity": equity,
@@ -24,7 +24,7 @@ class AccountCLI:
 
 
 def test_launch_preflight_requires_exact_fresh_equity(monkeypatch):
-    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA9JUDGEDJUDG")
+    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA0FIXTUREJDG")
     report = Report()
     check_account(AccountCLI(equity="99999.98"), report)
     assert report.failed
@@ -32,16 +32,16 @@ def test_launch_preflight_requires_exact_fresh_equity(monkeypatch):
 
 
 def test_resume_relaxes_only_the_fresh_equity_check(monkeypatch):
-    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA9JUDGEDJUDG")
+    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA0FIXTUREJDG")
     report = Report()
     check_account(AccountCLI(equity="97495.46"), report, require_fresh_equity=False)
     assert not report.failed
 
 
 def test_preflight_requires_the_named_account_to_match(monkeypatch):
-    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA9JUDGEDJUDG")
+    monkeypatch.setenv("APERTURE_EXPECT_ACCOUNT", "PA0FIXTUREJDG")
     report = Report()
-    check_account(AccountCLI(number="PA3DEVDEVDEV1"), report)
+    check_account(AccountCLI(number="PA0FIXTUREDEV"), report)
     assert report.failed
     assert any(
         check == "expected account identity" and status == "FAIL"
