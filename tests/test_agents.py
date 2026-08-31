@@ -331,3 +331,81 @@ def test_the_red_team_is_told_intent_but_never_the_author():
 
     for text in STRATEGY_INTENT.values():
         assert "CARRY" not in text and "CRUSH" not in text and "DRIFT" not in text
+
+
+# --------------------------------------------------------------------------- #
+# The scout learning from the desk's own experience
+# --------------------------------------------------------------------------- #
+
+
+VETOES = [
+    {"underlying": "NVDA", "reasons": [{"gate": "liquidity[NVDA260911C00250000]",
+                                        "reason": "spread 32% > 15% of mid"}]},
+    {"underlying": "NVDA", "reasons": [{"gate": "liquidity[NVDA260911C00255000]",
+                                        "reason": "spread 28% > 15% of mid"}]},
+    {"underlying": "WDAY", "reasons": [{"gate": "depth[WDAY260925C00210000]",
+                                        "reason": "no depth signal"},
+                                       {"gate": "liquidity[WDAY260925C00210000]",
+                                        "reason": "spread 44%"}]},
+    {"underlying": "SPY", "reasons": [{"gate": "session", "reason": "opening blackout"}]},
+]
+
+
+def test_refusals_are_counted_per_name():
+    from aperture.agents import refusal_history
+
+    history = refusal_history(VETOES)
+    assert history["NVDA"]["refused"] == 2
+    assert history["NVDA"]["gate"] == "liquidity"
+
+
+def test_the_gate_family_is_reported_not_the_contract():
+    """The scout picks a name, not a strike, so 'liquidity' is the useful unit --
+    not 'liquidity[NVDA260911C00250000]'."""
+    from aperture.agents import refusal_history
+
+    assert "[" not in refusal_history(VETOES)["NVDA"]["gate"]
+
+
+def test_a_name_refused_on_several_gates_reports_the_dominant_one():
+    from aperture.agents import refusal_history
+
+    assert refusal_history(VETOES)["WDAY"]["gate"] in {"depth", "liquidity"}
+
+
+def test_malformed_veto_rows_are_survivable():
+    from aperture.agents import refusal_history
+
+    assert refusal_history([{}, {"underlying": ""}, {"underlying": "X"}]) == {
+        "X": {"refused": 1, "gate": "unknown"}
+    }
+
+
+def test_experience_reaches_the_rows_the_scout_reads():
+    from aperture.agents import note_refusals, refusal_history
+
+    rows = note_refusals(
+        [{"symbol": "NVDA"}, {"symbol": "SPY"}, {"symbol": "GLD"}],
+        refusal_history(VETOES),
+    )
+    assert "refused this name 2x" in rows[0]["desk_experience"]
+    assert "liquidity" in rows[0]["desk_experience"]
+    assert "desk_experience" not in rows[2]      # never refused, nothing to say
+
+
+def test_experience_informs_the_agent_but_does_not_filter_for_it():
+    """Deliberately not a hard exclusion. A code-level filter would move the
+    decision out of the agent, which is the mistake this project keeps having to
+    correct. The scout is told, and chooses."""
+    from aperture.agents import TRADEABLE_UNIVERSE, note_refusals, refusal_history
+
+    rows = note_refusals([{"symbol": s} for s in TRADEABLE_UNIVERSE],
+                         refusal_history(VETOES))
+    assert len(rows) == len(TRADEABLE_UNIVERSE)   # nothing was removed
+
+
+def test_the_scout_prompt_tells_it_what_the_experience_means():
+    from aperture.agents import SCOUT_SYSTEM
+
+    assert "desk's own experience" in SCOUT_SYSTEM
+    assert "refused" in SCOUT_SYSTEM

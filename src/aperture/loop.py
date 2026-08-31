@@ -35,7 +35,7 @@ from .alpaca_cli import AlpacaCLI, AlpacaCliError, idempotency_key
 from .contracts import Side, parse_occ
 from .agents import (
     RedTeamVerdict, apply_kill_budget, call_regime, choose_universe,
-    intent_for, rank_proposals, red_team,
+    intent_for, note_refusals, rank_proposals, red_team, refusal_history,
 )
 from .earnings import EarningsCalendar
 from .execution import adapt, clamp, measure_fills
@@ -299,6 +299,12 @@ def run_cycle(
     # built for an agent to see through -- while the CLI stays the hands. MCP
     # also reaches news, which the CLI path never gave the desk at all.
     candidates = _candidate_market(md)
+    # What the desk has learned about its own executability. Without this the
+    # scout re-picks names the Warden has refused all session, because nothing
+    # ever tells it.
+    candidates = note_refusals(
+        candidates, refusal_history(warden.audit.vetoes(limit=150))
+    )
     brief = fetch_brief([row["symbol"] for row in candidates])
     if brief.ok:
         candidates = enrich(candidates, brief)

@@ -213,7 +213,7 @@ npm test
 npm run check
 ```
 
-The current suite contains 312 Python tests and 6 Worker-runtime tests.
+The current suite contains 319 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 
