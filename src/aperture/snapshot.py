@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .alpaca_cli import AlpacaCLI, AlpacaCliError
+from .version import desk_version
 from .state import DeskState
 from .warden import AuditLog
 
@@ -47,6 +48,8 @@ POSITION_FIELDS = (
 # identity -- the forbidden-key sweep still runs over the finished snapshot.
 AUDIT_FIELDS = (
     "ts", "event", "strategy", "underlying", "summary", "rationale", "reason",
+    # which build was running when this happened
+    "version",
     # what the agents decided, and on what grounds
     "symbols", "reasons", "posture", "confidence", "objection", "severity",
     "source", "unchallenged",
@@ -81,6 +84,7 @@ class Snapshot:
 
         return {
             "schema_version": 1,
+            "desk_version": desk_version(),
             "mode": mode,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),

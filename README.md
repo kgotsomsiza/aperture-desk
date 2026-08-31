@@ -213,7 +213,7 @@ npm test
 npm run check
 ```
 
-The current suite contains 308 Python tests and 6 Worker-runtime tests.
+The current suite contains 312 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 
@@ -242,6 +242,7 @@ src/aperture/
   state.py           the ledger and its per-account audit trail
   preflight.py       pre-session checks
   consistency.py     fails the suite when a change was not carried through
+  version.py         which build is running, stamped into the audit trail
 dashboard/
   src/index.ts       Worker API and snapshot validation
   site/              zero-framework public evidence surface

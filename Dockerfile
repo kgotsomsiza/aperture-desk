@@ -26,6 +26,11 @@ RUN pip install --no-cache-dir mcp httpx numpy pandas pydantic \
 
 COPY src/ ./src/
 
+# Stamped at build time: the container has no git repository, so this is the
+# only way it can say which build it is. Passed with --build-arg GIT_SHA=...
+ARG GIT_SHA=unknown
+ENV APERTURE_VERSION=$GIT_SHA
+
 # Run as a non-root user: this container holds trading credentials.
 RUN useradd --create-home --uid 10001 desk \
     && mkdir -p /app/state /app/public \

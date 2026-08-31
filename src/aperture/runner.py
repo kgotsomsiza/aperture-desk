@@ -46,6 +46,7 @@ from .research import promotion_records, run_lab
 from .risk import RiskLimits
 from .snapshot import Snapshot, publish_remote, write
 from .state import DeskState, audit_path_for
+from .version import desk_version
 from .warden import AuditLog, RiskWarden
 
 log = logging.getLogger("aperture.runner")
@@ -76,9 +77,18 @@ class Runner:
     # ------------------------------------------------------------------ #
 
     def run(self) -> int:
+        version = desk_version()
         log.info(
-            "runner starting | feed=%s | state=%s | deadline=%s | dry_run=%s",
-            self.args.feed, self.state_path, DEADLINE.isoformat(), self.args.dry_run,
+            "runner starting | version=%s | feed=%s | state=%s | deadline=%s | dry_run=%s",
+            version, self.args.feed, self.state_path, DEADLINE.isoformat(), self.args.dry_run,
+        )
+        # A process cannot change its own code, so every decision from here to
+        # the next startup event was made by this build. One line partitions the
+        # whole audit trail by version; stamping every event would not say more.
+        self.audit.record(
+            "desk_started", version=version, feed=self.args.feed,
+            dry_run=self.args.dry_run,
+            reason=f"build {version} took the desk at {self.args.interval}s cadence",
         )
         while not self.stopping:
             if datetime.now(timezone.utc) >= DEADLINE.astimezone(timezone.utc):

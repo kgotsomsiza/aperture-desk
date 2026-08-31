@@ -68,6 +68,7 @@ EVENT_REGISTRY: dict[str, str] = {
     "red_team_kill": "public",            # the objection that removed a trade
     "red_team_budget_spent": "public",    # proposals that went unchallenged
     "mcp_research": "public",             # what the agents looked at
+    "desk_started": "public",             # which build took the desk, and when
     # --- the desk reasoning about itself ------------------------------------
     "execution_adapted": "public",        # noticing it was not getting filled
     "allocation": "public",               # capital moving on evidence

@@ -392,6 +392,11 @@ function decisionText(decision) {
     case "mcp_research":
       if (decision.symbols) return `Researched ${list(decision.symbols)} via ${decision.source || "MCP"}`;
       break;
+    case "desk_started":
+      if (decision.version) {
+        return `Build ${decision.version} took the desk`;
+      }
+      break;
     case "red_team_budget_spent":
       if (decision.unchallenged) {
         return `${decision.unchallenged} proposal(s) went unchallenged: red team budget spent`;

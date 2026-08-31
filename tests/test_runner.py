@@ -140,3 +140,47 @@ def test_remote_dashboard_failure_cannot_undo_local_snapshot(monkeypatch, tmp_pa
 
     assert (tmp_path / "snapshot.json").exists()
     assert "remote snapshot publish failed" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Build provenance
+# --------------------------------------------------------------------------- #
+
+
+def test_a_build_identifies_itself():
+    from aperture.version import desk_version
+
+    v = desk_version()
+    assert isinstance(v, str) and v
+
+
+def test_a_stamped_image_reports_what_it_was_built_from(monkeypatch):
+    from aperture import version
+
+    version.desk_version.cache_clear()
+    monkeypatch.setenv("APERTURE_VERSION", "abc1234")
+    assert version.desk_version() == "abc1234"
+    version.desk_version.cache_clear()
+
+
+def test_an_unsubstituted_build_arg_is_not_mistaken_for_a_version(monkeypatch):
+    """A Dockerfile default that never got substituted must not be published as
+    though it were a real commit."""
+    from aperture import version
+
+    version.desk_version.cache_clear()
+    monkeypatch.setenv("APERTURE_VERSION", "$GIT_SHA")
+    assert version.desk_version() != "$GIT_SHA"
+    version.desk_version.cache_clear()
+
+
+def test_provenance_never_blocks_trading(monkeypatch):
+    """Evidence about trading is not a precondition for it."""
+    from aperture import version
+
+    version.desk_version.cache_clear()
+    monkeypatch.delenv("APERTURE_VERSION", raising=False)
+    monkeypatch.setattr(version.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    assert version.desk_version() == version.UNKNOWN
+    version.desk_version.cache_clear()
