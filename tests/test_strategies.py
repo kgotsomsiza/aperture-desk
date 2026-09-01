@@ -665,3 +665,93 @@ def test_a_wide_condor_prices_more_aggressively_than_a_tight_one():
     assert tight is not None and wide is not None
     # Both are credits (negative); the wide one gives up more of it to get filled.
     assert wide.net_price > tight.net_price
+
+
+# --------------------------------------------------------------------------- #
+# CONVEX — the sleeve that buys movement
+# --------------------------------------------------------------------------- #
+
+
+def _convex(**kw):
+    from aperture.strategies.convex import ConvexStrategy
+    s = ConvexStrategy()
+    for k, v in kw.items():
+        setattr(s, k, v)
+    return s
+
+
+class _Book:
+    """Minimum book surface the strategy touches."""
+    equity = 100_000.0
+    def __init__(self, held=None):
+        self._held = held or {}
+    @property
+    def open_risk_by_underlying(self):
+        return self._held
+
+
+def test_convex_stands_down_when_the_desk_is_selling_premium():
+    """Selling volatility and buying it in the same cycle is incoherent. The
+    agents decide the posture; this sleeve asks rather than assumes."""
+    s = _convex(posture="sell_premium", iv_to_realised=0.90)
+    assert s.propose(None, _Book(), 5000.0) == []
+
+
+def test_convex_stands_down_when_the_regime_says_stand_down():
+    s = _convex(posture="stand_down", iv_to_realised=0.90)
+    assert s.propose(None, _Book(), 5000.0) == []
+
+
+def test_convex_refuses_to_buy_movement_that_is_not_cheap():
+    """Above the threshold the premium-selling sleeves are the right expression;
+    paying fair value for convexity is not a reason to act."""
+    s = _convex(posture="balanced", iv_to_realised=1.20)
+    assert s.propose(None, _Book(), 5000.0) == []
+
+
+def test_convex_needs_a_budget():
+    s = _convex(posture="buy_convexity", iv_to_realised=0.80)
+    assert s.propose(None, _Book(), 0.0) == []
+
+
+def test_convex_never_averages_down():
+    """A convex sleeve that keeps buying while it bleeds is a slow way to spend
+    the account. One position per name, and no adding to it."""
+    s = _convex(posture="buy_convexity", iv_to_realised=0.80)
+    held = _Book({"SPY": 2500.0, "QQQ": 2500.0})
+    assert s.propose(None, held, 5000.0) == []
+
+
+def test_convex_max_loss_is_exactly_the_premium():
+    """The whole case for this sleeve is that its budget and its worst case are
+    the same number."""
+    from aperture.contracts import PositionIntent, Side
+    from aperture.risk import Leg, Proposal, analyse_payoff
+
+    legs = (
+        Leg("SPY260904P00755000", Side.BUY, 1, PositionIntent.BUY_TO_OPEN),
+        Leg("SPY260904C00779000", Side.BUY, 1, PositionIntent.BUY_TO_OPEN),
+    )
+    p = Proposal("CONVEX", "SPY", legs, qty=49, net_price=1.01, rationale="strangle")
+    profile = analyse_payoff(p)
+    assert profile.max_loss == pytest.approx(1.01 * 49 * 100)
+
+
+def test_convex_upside_is_uncapped():
+    """That asymmetry is the reason the sleeve exists in a tournament."""
+    from aperture.contracts import PositionIntent, Side
+    from aperture.risk import Leg, Proposal, analyse_payoff
+
+    legs = (
+        Leg("SPY260904P00755000", Side.BUY, 1, PositionIntent.BUY_TO_OPEN),
+        Leg("SPY260904C00779000", Side.BUY, 1, PositionIntent.BUY_TO_OPEN),
+    )
+    profile = analyse_payoff(Proposal("CONVEX", "SPY", legs, 10, 1.01, "strangle"))
+    assert profile.max_profit is None
+
+
+def test_the_convex_budget_is_also_its_maximum_loss():
+    from aperture.runner import _budgets
+
+    b = _budgets(100_000.0)
+    assert b["CONVEX"] == 5_000.0

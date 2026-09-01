@@ -213,13 +213,14 @@ npm test
 npm run check
 ```
 
-The current suite contains 319 Python tests and 6 Worker-runtime tests.
+The current suite contains 327 Python tests and 6 Worker-runtime tests.
 
 ## Repository map
 
 ```text
 src/aperture/
   strategies/        founding and research-hired strategy implementations
+                     carry/crush/drift sell premium; convex buys it
   agents.py          the four agents: scout, regime, red team, portfolio manager
   mcp_research.py    market and news research over Alpaca's MCP server
   llm.py             provider abstraction, tiers, and deterministic fallback

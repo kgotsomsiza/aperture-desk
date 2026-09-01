@@ -345,7 +345,14 @@ class Runner:
 
 
 def _budgets(equity: float) -> dict[str, float]:
-    return {"CARRY": equity * 0.18, "CRUSH": equity * 0.05, "DRIFT": equity * 0.05}
+    return {
+        "CARRY": equity * 0.18,
+        "CRUSH": equity * 0.05,
+        "DRIFT": equity * 0.05,
+        # The convex sleeve is the desk's right tail. Its whole budget is
+        # premium paid, so this number is also the most it can ever lose.
+        "CONVEX": equity * 0.05,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

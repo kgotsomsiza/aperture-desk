@@ -46,7 +46,7 @@ from .mcp_research import enrich, fetch_brief
 from .contracts import PositionIntent
 from .risk import BookState, Leg, Proposal, RiskLimits, analyse_payoff
 from .state import DeskState, audit_path_for, OpenTrade
-from .strategies import carry, crush, drift
+from .strategies import carry, convex, crush, drift
 from .strategies.hired import HiredCondorStrategy
 from .strategies.base import Strategy, structure_price
 from .warden import AuditLog, RiskWarden
@@ -111,6 +111,7 @@ def build_strategies(state: DeskState | None = None) -> list[Strategy]:
         carry.CarryStrategy(),
         crush.CrushStrategy(calendar=calendar),
         drift.DriftStrategy(calendar=calendar),
+        convex.ConvexStrategy(),
     ]
     for record in (state.hired_strategies if state else []):
         if record.get("status", "probation") not in {"fired", "retired"}:
@@ -284,7 +285,8 @@ def run_cycle(
     #    whether any of it is allowed -- but WHAT to look at, and how hard to
     #    lean, is judgement, and judgement is what the agents are for.
     agent = provider or NullProvider()
-    regime = call_regime(agent, _market_conditions(md, state, book))
+    conditions = _market_conditions(md, state, book)
+    regime = call_regime(agent, conditions)
     if regime.decided_by != "default":
         log.info("regime: %s (%.0f%%) -- %s",
                  regime.posture, regime.confidence * 100, regime.reason)
@@ -320,6 +322,13 @@ def run_cycle(
         warden.audit.record("universe", symbols=list(universe.symbols),
                             reasons=universe.reasons)
     summary["universe"] = list(universe.symbols)
+    # The convex sleeve only acts when the agents are not selling premium and
+    # movement is cheap. It is told both rather than inferring either.
+    for strategy in strategies:
+        if strategy.config.strategy_id == "CONVEX":
+            strategy.posture = regime.posture
+            strategy.iv_to_realised = conditions.get("iv_to_realised")
+
     for strategy in strategies:
         if strategy.config.strategy_id == "CARRY":
             strategy.config.universe = universe.symbols
@@ -455,6 +464,9 @@ def _market_conditions(md: MarketData, state: DeskState, book: BookState) -> dic
             "SPY 30d implied vol": f"{atm_iv:.1%}",
             "SPY realised vol (60d)": f"{realised:.1%}",
             "implied / realised": f"{(atm_iv / realised):.2f}x" if realised else "n/a",
+            # Numeric, for the convex sleeve. The strings above are for the agent
+            # to read; a strategy needs the number.
+            "iv_to_realised": (atm_iv / realised) if realised and atm_iv else None,
             "book drawdown": f"{book.drawdown_pct:.1%}",
             "open risk": f"${book.total_open_risk:,.0f} of ${book.equity:,.0f}",
         }

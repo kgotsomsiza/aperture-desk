@@ -186,7 +186,7 @@ def test_promoted_research_strategy_joins_the_live_roster_on_probation(tmp_path)
     ]
 
     roster = {strategy.config.strategy_id for strategy in build_strategies(state)}
-    assert roster == {"CARRY", "CRUSH", "DRIFT", "LAB-ACTIVE"}
+    assert roster == {"CARRY", "CRUSH", "DRIFT", "CONVEX", "LAB-ACTIVE"}
     assert _priors(state)["LAB-ACTIVE"] == 0.0
     assert "LAB-FIRED" not in _priors(state)
 
