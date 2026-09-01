@@ -36,8 +36,13 @@ log = logging.getLogger(__name__)
 # and options depth. An agent that could name any ticker would eventually name
 # one with a two-dollar-wide market, and the desk would spend a day being
 # refused by its own liquidity gate.
+# IWM was removed 2 Sep on the desk's own evidence: pooled across 900 days it
+# returned -2.3% of risk over 51 trades (t=-0.48) while SPY, QQQ and DIA each
+# cleared t>2 at roughly +11%. It is the largest sample in the study and the only
+# name where the strategy does not work -- small caps carry different vol and
+# skew. See scripts/evidence.py.
 TRADEABLE_UNIVERSE = (
-    "SPY", "QQQ", "IWM", "DIA",
+    "SPY", "QQQ", "DIA",
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
     "AVGO", "CRM", "NFLX", "JPM", "XLF", "XLE", "GLD", "TLT",
 )
@@ -144,7 +149,7 @@ def choose_universe(
     provider: LLMProvider,
     market: Sequence[dict[str, Any]],
     *,
-    default: Sequence[str] = ("SPY", "QQQ", "IWM"),
+    default: Sequence[str] = ("SPY", "QQQ", "DIA"),
     max_names: int = 6,
 ) -> UniverseChoice:
     """Today's tradeable list.

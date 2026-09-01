@@ -81,13 +81,13 @@ def test_scout_cannot_invent_a_ticker():
 
 def test_scout_falls_back_when_the_agent_says_too_little():
     choice = choose_universe(Canned({"picks": [{"symbol": "SPY", "reason": "x"}]}), MARKET)
-    assert choice.symbols == ("SPY", "QQQ", "IWM")
+    assert choice.symbols == ("SPY", "QQQ", "DIA")
     assert "default" in choice.decided_by
 
 
 def test_scout_survives_a_dead_provider():
     choice = choose_universe(Broken(), MARKET)
-    assert choice.symbols == ("SPY", "QQQ", "IWM")
+    assert choice.symbols == ("SPY", "QQQ", "DIA")
 
 
 def test_scout_respects_the_cap():
@@ -97,7 +97,7 @@ def test_scout_respects_the_cap():
 
 def test_no_agent_means_the_designed_universe():
     choice = choose_universe(NullProvider(), MARKET)
-    assert choice.symbols == ("SPY", "QQQ", "IWM")
+    assert choice.symbols == ("SPY", "QQQ", "DIA")
 
 
 # --------------------------------------------------------------------------- #
@@ -409,3 +409,22 @@ def test_the_scout_prompt_tells_it_what_the_experience_means():
 
     assert "desk's own experience" in SCOUT_SYSTEM
     assert "refused" in SCOUT_SYSTEM
+
+
+def test_the_desk_does_not_trade_a_name_its_own_research_rejects():
+    """IWM: -2.3% of risk over 51 trades, t=-0.48 — the largest sample in the
+    study and the only underlying where the strategy fails. SPY, QQQ and DIA
+    each cleared t>2 at roughly +11%. Removing it is the first time this desk
+    changed its behaviour because the research told it to."""
+    from aperture.agents import TRADEABLE_UNIVERSE, choose_universe
+    from aperture.llm import NullProvider
+
+    assert "IWM" not in TRADEABLE_UNIVERSE
+    assert "IWM" not in choose_universe(NullProvider(), []).symbols
+
+
+def test_the_names_the_research_supports_are_still_tradeable():
+    from aperture.agents import TRADEABLE_UNIVERSE
+
+    for name in ("SPY", "QQQ", "DIA"):
+        assert name in TRADEABLE_UNIVERSE
