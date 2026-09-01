@@ -331,6 +331,20 @@ class DeskState:
             table[trade.underlying] = table.get(trade.underlying, 0.0) + trade.max_loss
         return table
 
+    def open_risk_by_strategy_underlying(self) -> dict[tuple[str, str], float]:
+        """Open risk keyed by *both* strategy and name.
+
+        The by-underlying view alone conflates sleeves that hold opposite
+        exposure. CONVEX buys movement on SPY while CARRY sells it; asking only
+        "does the book hold SPY" tells CONVEX it is already positioned when it
+        holds nothing at all.
+        """
+        table: dict[tuple[str, str], float] = {}
+        for trade in self.open_trades.values():
+            key = (trade.strategy_id, trade.underlying)
+            table[key] = table.get(key, 0.0) + trade.max_loss
+        return table
+
     def trades_for(self, strategy_id: str) -> list[OpenTrade]:
         return [t for t in self.open_trades.values() if t.strategy_id == strategy_id]
 

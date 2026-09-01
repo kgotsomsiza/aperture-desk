@@ -94,9 +94,14 @@ class ConvexStrategy:
 
         # Split the allowance across the names still available. Handing each the
         # full budget would spend the sleeve's entire risk twice over.
+        # Only this sleeve's own positions block it. Reading the book-wide
+        # view instead meant CARRY's SPY and QQQ condors permanently blocked
+        # CONVEX from the only two names it trades -- so the sleeve could never
+        # fire at all. Caught by scripts/preopen.py before it cost a session.
+        held = book.open_risk_by_strategy_underlying
         eligible = [
             u for u in self.config.universe
-            if book.open_risk_by_underlying.get(u, 0.0) <= 0
+            if held.get((self.config.strategy_id, u), 0.0) <= 0
         ]
         if not eligible:
             return []

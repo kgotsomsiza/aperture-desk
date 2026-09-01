@@ -681,12 +681,19 @@ def _convex(**kw):
 
 
 class _Book:
-    """Minimum book surface the strategy touches."""
+    """Minimum book surface the strategy touches.
+
+    `held` is keyed by (strategy_id, underlying), because a sleeve is only
+    positioned in what it holds itself.
+    """
     equity = 100_000.0
     def __init__(self, held=None):
         self._held = held or {}
     @property
     def open_risk_by_underlying(self):
+        return {u: v for (_s, u), v in self._held.items()}
+    @property
+    def open_risk_by_strategy_underlying(self):
         return self._held
 
 
@@ -718,7 +725,7 @@ def test_convex_never_averages_down():
     """A convex sleeve that keeps buying while it bleeds is a slow way to spend
     the account. One position per name, and no adding to it."""
     s = _convex(posture="buy_convexity", iv_to_realised=0.80)
-    held = _Book({"SPY": 2500.0, "QQQ": 2500.0})
+    held = _Book({("CONVEX", "SPY"): 2500.0, ("CONVEX", "QQQ"): 2500.0})
     assert s.propose(None, held, 5000.0) == []
 
 
@@ -773,3 +780,45 @@ def test_convex_still_refuses_genuinely_expensive_volatility():
     not a strategy."""
     s = _convex(posture="balanced", iv_to_realised=1.40)
     assert s.propose(None, _Book(), 5000.0) == []
+
+
+def test_convex_is_not_blocked_by_another_sleeve_holding_the_same_name():
+    """CARRY sells SPY movement; CONVEX buys it. They are opposite positions in
+    the same ticker, and one must not silently exclude the other.
+
+    This is the bug that would have kept CONVEX inert for a second session:
+    its 'never average down' check read the book-wide open risk, so CARRY's SPY
+    and QQQ condors blocked the only two names CONVEX trades."""
+    from aperture.strategies.convex import ConvexStrategy
+
+    class Book:
+        equity = 100_000.0
+        open_risk_by_underlying = {"SPY": 2702.0, "QQQ": 1512.0}   # CARRY's
+        open_risk_by_strategy_underlying = {("CARRY", "SPY"): 2702.0,
+                                            ("CARRY", "QQQ"): 1512.0}
+
+    s = ConvexStrategy()
+    s.posture, s.iv_to_realised = "balanced", 1.05
+    eligible = [
+        u for u in s.config.universe
+        if Book.open_risk_by_strategy_underlying.get((s.config.strategy_id, u), 0.0) <= 0
+    ]
+    assert eligible == ["SPY", "QQQ"]        # both still available to CONVEX
+
+
+def test_convex_does_still_refuse_to_double_its_own_position():
+    """The rule it was meant to enforce still holds."""
+    from aperture.strategies.convex import ConvexStrategy
+
+    class Book:
+        equity = 100_000.0
+        open_risk_by_underlying = {"SPY": 2457.0}
+        open_risk_by_strategy_underlying = {("CONVEX", "SPY"): 2457.0}
+
+    s = ConvexStrategy()
+    s.posture, s.iv_to_realised = "balanced", 1.05
+    eligible = [
+        u for u in s.config.universe
+        if Book.open_risk_by_strategy_underlying.get((s.config.strategy_id, u), 0.0) <= 0
+    ]
+    assert eligible == ["QQQ"]               # SPY excluded, QQQ still open

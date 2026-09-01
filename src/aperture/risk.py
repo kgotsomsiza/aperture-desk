@@ -200,6 +200,11 @@ class BookState:
     now: datetime  # timezone-aware, US/Eastern
     open_risk_by_strategy: dict[str, float] = field(default_factory=dict)
     open_risk_by_underlying: dict[str, float] = field(default_factory=dict)
+    # Keyed by (strategy_id, underlying). A sleeve that holds no position in
+    # a name is not positioned in it, however much the rest of the book holds.
+    open_risk_by_strategy_underlying: dict[tuple[str, str], float] = field(
+        default_factory=dict
+    )
 
     @property
     def total_open_risk(self) -> float:
