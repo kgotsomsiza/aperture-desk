@@ -56,9 +56,17 @@ DEFAULT_CONFIG = StrategyConfig(
 # ordinary move reaches it; far enough that the premium stays cheap.
 OTM_FRACTION = 0.015
 
-# Only buy when implied is this much below realised or better. At 1.0 the desk
-# would be paying fair value for movement, which is not a reason to act.
-MAX_IV_TO_REALISED = 0.98
+# Refuse only when movement is genuinely EXPENSIVE -- not merely fairly priced.
+#
+# This was 0.98 for one day, and that was a conceptual error worth recording: it
+# is a *value* filter bolted onto an instrument that exists for its *shape*. The
+# case for this sleeve is that a near-certain small gain cannot win a tournament
+# and a right tail can. That argument holds at fair value; it only fails when the
+# tail is being sold at a real premium. At 1.03x the overpay is about 3% of the
+# premium -- roughly $150 on a $5,000 sleeve -- against a materially better
+# distribution. Gating that out left the sleeve inert and quietly reverted the
+# desk to the posture it was built to correct.
+MAX_IV_TO_REALISED = 1.15
 
 
 @dataclass

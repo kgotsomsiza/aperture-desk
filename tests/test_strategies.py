@@ -755,3 +755,21 @@ def test_the_convex_budget_is_also_its_maximum_loss():
 
     b = _budgets(100_000.0)
     assert b["CONVEX"] == 5_000.0
+
+
+def test_convex_still_buys_at_fair_value():
+    """The sleeve exists for the shape of its payoff, not because volatility is
+    underpriced. Gating it at 0.98 left it inert the moment IV crossed realised,
+    which silently reverted the desk to the posture CONVEX was added to correct."""
+    from aperture.strategies.convex import MAX_IV_TO_REALISED
+
+    assert MAX_IV_TO_REALISED > 1.0
+    s = _convex(posture="balanced", iv_to_realised=1.03)
+    assert s.iv_to_realised <= MAX_IV_TO_REALISED   # would not be gated out
+
+
+def test_convex_still_refuses_genuinely_expensive_volatility():
+    """Bounded on the other side: paying a real premium for the tail is a cost,
+    not a strategy."""
+    s = _convex(posture="balanced", iv_to_realised=1.40)
+    assert s.propose(None, _Book(), 5000.0) == []
