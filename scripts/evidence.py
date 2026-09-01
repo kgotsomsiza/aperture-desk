@@ -6,9 +6,11 @@ t = 1.02 is what noise looks like. Every decision the desk makes rests on an
 evidence base too thin to support it, and no amount of live trading over four
 days will fix that.
 
-The constraint is not the design -- the backtest samples up to 120 expiries. It
-is that free-tier option history is sparse, so most sampled expiries yield no
-usable chain. One underlying therefore produces ~13 trades over 20 months.
+The constraint is not the data and not the design. SPY alone has 27,995 option
+contracts across 114 expiries already cached. The backtest's own diagnostics say
+where the opportunities go: 331 rejected by the 15% credit floor and 225 by the
+one-position-at-a-time rule, leaving 19. We discard ~97% of a rich sample by
+policy and then cannot measure anything with what is left.
 
 The fix is more underlyings, not more time. A t-statistic scales with the square
 root of the sample, so pooling four liquid index ETFs turns t = 1.02 into
@@ -51,7 +53,10 @@ def t_stat(pnls: list[float]) -> float:
 
 def main() -> int:
     logging.basicConfig(level=logging.WARNING, format="  %(levelname)s %(message)s")
-    cli = AlpacaCLI()
+    # A 900-day option-contract listing does not come back inside the CLI's
+    # default 30s. That timeout is right for a trading cycle and wrong for a
+    # research pull; it is the whole reason the first attempt failed.
+    cli = AlpacaCLI(timeout=300)
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
     spec = CondorSpec()  # the incumbent, unchanged
@@ -73,7 +78,7 @@ def main() -> int:
             )
             result = simulate_condors(history, spec, strategy_id=f"CARRY/{symbol}")
         except Exception as exc:  # noqa: BLE001 - one name must not stop the study
-            print(f"  {symbol:5} FAILED: {type(exc).__name__} {str(exc)[:70]}")
+            print(f"  {symbol:5} FAILED: {type(exc).__name__} {str(exc)[:70]}", flush=True)
             continue
 
         pnls = [t.pnl for t in result.trades]
@@ -83,7 +88,7 @@ def main() -> int:
         pooled_pnl += pnls
         pooled_risk += risk
         print(f"  {symbol:5} {result.n:4d} trades  {result.wins:3d} wins  "
-              f"edge {edge:+6.1%}  t={t_stat(pnls):5.2f}")
+              f"edge {edge:+6.1%}  t={t_stat(pnls):5.2f}", flush=True)
 
     print("-" * 72)
     n = len(pooled_pnl)
