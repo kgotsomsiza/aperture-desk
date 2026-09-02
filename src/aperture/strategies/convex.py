@@ -44,7 +44,11 @@ DEFAULT_CONFIG = StrategyConfig(
     weight=0.05,
     enabled=True,
     universe=("SPY", "QQQ"),
-    min_dte=3,
+    # 1, not 3: the expiry rule below wants the first expiry AFTER the
+    # measurement, and a floor of 3 filters that candidate out of the chain
+    # before the rule ever sees it. The floor's old job -- keeping residual
+    # time value at the measurement -- is now done by the rule itself.
+    min_dte=1,
     max_dte=10,
     spread_width=0.0,
     min_credit_to_width=0.0,   # a debit structure: there is no credit to test
@@ -110,11 +114,11 @@ class ConvexStrategy:
         # view instead meant CARRY's SPY and QQQ condors permanently blocked
         # CONVEX from the only two names it trades -- so the sleeve could never
         # fire at all. Caught by scripts/preopen.py before it cost a session.
-        held = book.open_risk_by_strategy_underlying
-        eligible = [
-            u for u in self.config.universe
-            if held.get((self.config.strategy_id, u), 0.0) <= 0
-        ]
+        # A different expiry in the same name is a different position, not
+        # averaging down. The sleeve may hold a slow layer and a fast one: what
+        # it must not do is buy the same structure twice.
+        self._held_expiries = book.open_expiries_by_strategy_underlying
+        eligible = list(self.config.universe)
         if not eligible:
             return []
 
@@ -155,6 +159,11 @@ class ConvexStrategy:
         expiry = self._pick_expiry(snapshots.values())
         if expiry is None:
             return None
+        already = getattr(self, "_held_expiries", {}).get(
+            (self.config.strategy_id, underlying), set()
+        )
+        if expiry in already:
+            return None  # same name, same expiry: that would be averaging down
         pool = list(for_expiry(snapshots.values(), expiry))
 
         call = self._nearest(pool, Right.CALL, spot * (1 + OTM_FRACTION))
@@ -191,6 +200,24 @@ class ConvexStrategy:
         return min(candidates, key=lambda s: abs(s.strike - target))
 
     def _pick_expiry(self, snapshots) -> date | None:
+        """The shortest-dated expiry that still has life at the measurement.
+
+        Gamma -- sensitivity to a move -- is concentrated at the short end, and
+        on the final day a move is the only thing that can change the measured
+        number, because six hours of theta is nothing. So take the *first expiry
+        after the desk is measured*: maximum responsiveness, while still holding
+        real time value when the number is taken rather than being a coin that
+        has already landed.
+        """
+        from ..loop import DEADLINE
+
+        available = sorted(expiries(snapshots))
+        after = [e for e in available if e > DEADLINE.date()]
+        if after:
+            return after[0]
+        return available[0] if available else None
+
+    def _pick_expiry_nearest(self, snapshots) -> date | None:
         """The nearest expiry inside the window.
 
         Convexity is cheapest and most explosive at the short end. But the floor

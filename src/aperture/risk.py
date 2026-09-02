@@ -205,6 +205,10 @@ class BookState:
     open_risk_by_strategy_underlying: dict[tuple[str, str], float] = field(
         default_factory=dict
     )
+    # (strategy_id, underlying) -> the expiries that sleeve already holds there.
+    open_expiries_by_strategy_underlying: dict[tuple[str, str], set] = field(
+        default_factory=dict
+    )
 
     @property
     def total_open_risk(self) -> float:

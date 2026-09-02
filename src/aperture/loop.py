@@ -144,6 +144,7 @@ def build_book(
         open_risk_by_strategy=state.open_risk_by_strategy(),
         open_risk_by_underlying=state.open_risk_by_underlying(),
         open_risk_by_strategy_underlying=state.open_risk_by_strategy_underlying(),
+        open_expiries_by_strategy_underlying=state.open_expiries_by_strategy_underlying(),
     )
 
 

@@ -331,6 +331,25 @@ class DeskState:
             table[trade.underlying] = table.get(trade.underlying, 0.0) + trade.max_loss
         return table
 
+    def open_expiries_by_strategy_underlying(self) -> dict[tuple[str, str], set]:
+        """Which expiries each sleeve already holds in each name.
+
+        A second structure on the same name but a *different* expiry is a
+        different position, not averaging down. The convex sleeve needs that
+        distinction to add a short-dated layer beside a longer-dated one.
+        """
+        from .contracts import parse_occ
+
+        table: dict[tuple[str, str], set] = {}
+        for trade in self.open_trades.values():
+            key = (trade.strategy_id, trade.underlying)
+            for leg in trade.legs:
+                try:
+                    table.setdefault(key, set()).add(parse_occ(leg).expiry)
+                except Exception:  # noqa: BLE001 - a malformed leg is not fatal
+                    continue
+        return table
+
     def open_risk_by_strategy_underlying(self) -> dict[tuple[str, str], float]:
         """Open risk keyed by *both* strategy and name.
 

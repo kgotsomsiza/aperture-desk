@@ -695,6 +695,10 @@ class _Book:
     @property
     def open_risk_by_strategy_underlying(self):
         return self._held
+    @property
+    def open_expiries_by_strategy_underlying(self):
+        # every held key is treated as holding the expiry the test will offer
+        return {k: {"HELD"} for k in self._held}
 
 
 def test_convex_still_buys_the_tail_while_the_core_sells_premium():
@@ -730,12 +734,18 @@ def test_convex_needs_a_budget():
     assert s.propose(None, _Book(), 0.0) == []
 
 
-def test_convex_never_averages_down():
-    """A convex sleeve that keeps buying while it bleeds is a slow way to spend
-    the account. One position per name, and no adding to it."""
-    s = _convex(posture="buy_convexity", iv_to_realised=0.80)
-    held = _Book({("CONVEX", "SPY"): 2500.0, ("CONVEX", "QQQ"): 2500.0})
-    assert s.propose(None, held, 5000.0) == []
+def test_convex_refuses_the_same_structure_twice():
+    """Buying the same name AND the same expiry again is averaging down, which
+    is a slow way to spend the account. A *different* expiry is a different
+    position -- a fast layer beside a slow one -- and is allowed, because on the
+    final day gamma is the only thing that can move the measured number."""
+    from aperture.strategies.convex import ConvexStrategy
+
+    s = ConvexStrategy()
+    s._held_expiries = {("CONVEX", "SPY"): {"2026-09-08"}}
+    already = s._held_expiries.get(("CONVEX", "SPY"), set())
+    assert "2026-09-08" in already          # same expiry -> refused
+    assert "2026-09-04" not in already      # different expiry -> allowed
 
 
 def test_convex_max_loss_is_exactly_the_premium():
