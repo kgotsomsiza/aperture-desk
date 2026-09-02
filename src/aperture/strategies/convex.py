@@ -68,6 +68,11 @@ OTM_FRACTION = 0.015
 # desk to the posture it was built to correct.
 MAX_IV_TO_REALISED = 1.15
 
+# The Warden refuses any single structure whose max loss exceeds 4% of equity.
+# Sizing to 3.6% leaves room for the fill concession to move the price without
+# tipping a good proposal over a limit it could have respected up front.
+MAX_TRADE_LOSS_PCT = 0.036
+
 
 @dataclass
 class ConvexStrategy:
@@ -112,7 +117,14 @@ class ConvexStrategy:
         ]
         if not eligible:
             return []
+
+        # Stay inside the Warden's per-trade ceiling. The tournament multiplier
+        # can lift this sleeve's allowance above it, and a proposal sized past a
+        # limit the desk already publishes is simply a refused proposal -- which
+        # is how the first funded cycle was lost.
         per_name = budget / len(eligible)
+        per_trade_cap = book.equity * MAX_TRADE_LOSS_PCT
+        per_name = min(per_name, per_trade_cap)
 
         proposals: list[Proposal] = []
         for underlying in eligible:

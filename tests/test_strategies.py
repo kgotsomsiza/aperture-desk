@@ -831,3 +831,14 @@ def test_convex_does_still_refuse_to_double_its_own_position():
         if Book.open_risk_by_strategy_underlying.get((s.config.strategy_id, u), 0.0) <= 0
     ]
     assert eligible == ["QQQ"]               # SPY excluded, QQQ still open
+
+
+def test_convex_sizes_inside_the_wardens_per_trade_ceiling():
+    """The tournament multiplier can lift this sleeve's allowance above the 4%
+    single-trade cap. A proposal sized past a published limit is just a refused
+    proposal — that is how the first funded cycle was lost."""
+    from aperture.strategies.convex import MAX_TRADE_LOSS_PCT
+
+    equity, inflated_budget = 100_000.0, 12_546.0
+    per_name = min(inflated_budget / 2, equity * MAX_TRADE_LOSS_PCT)
+    assert per_name <= equity * 0.04
