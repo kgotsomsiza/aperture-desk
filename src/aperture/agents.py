@@ -32,19 +32,23 @@ from .llm import LLMProvider, NullProvider, ask_json
 
 log = logging.getLogger(__name__)
 
-# Agents may only choose from names the desk has already vetted for liquidity
-# and options depth. An agent that could name any ticker would eventually name
-# one with a two-dollar-wide market, and the desk would spend a day being
-# refused by its own liquidity gate.
-# IWM was removed 2 Sep on the desk's own evidence: pooled across 900 days it
-# returned -2.3% of risk over 51 trades (t=-0.48) while SPY, QQQ and DIA each
-# cleared t>2 at roughly +11%. It is the largest sample in the study and the only
-# name where the strategy does not work -- small caps carry different vol and
-# skew. See scripts/evidence.py.
+# The scout may only choose names the desk has actually validated.
+#
+# The evidence study (scripts/evidence.py, 900 days, 126 trades) tested four
+# index ETFs and found a real edge in three: SPY +10.7% t=2.17, QQQ +10.6%
+# t=2.60, DIA +11.7% t=2.15. IWM returned -2.3% over 51 trades and was removed.
+#
+# Every other name that used to sit here -- the single stocks and sector ETFs --
+# was **never tested**. NVDA was picked live, passed every gate legitimately,
+# and lost money twice. Two trades is not evidence of anything; the argument for
+# removing it is not that it lost, but that nothing ever showed it should work.
+# Single-name options also carry different skew and far worse liquidity: they
+# accounted for nearly every one of the 69 liquidity refusals on day one.
+#
+# Trade what the research supports. If a name is to come back, it comes back
+# through the lab with a t-statistic, not through a hunch.
 TRADEABLE_UNIVERSE = (
     "SPY", "QQQ", "DIA",
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
-    "AVGO", "CRM", "NFLX", "JPM", "XLF", "XLE", "GLD", "TLT",
 )
 
 POSTURES = ("sell_premium", "buy_convexity", "balanced", "stand_down")

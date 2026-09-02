@@ -56,12 +56,12 @@ MARKET = [
 
 def test_scout_picks_what_the_agent_chose():
     provider = Canned({"picks": [
-        {"symbol": "NVDA", "reason": "IV 1.55x realised"},
+        {"symbol": "QQQ", "reason": "IV 1.55x realised"},
         {"symbol": "SPY", "reason": "liquid ballast"},
-        {"symbol": "TSLA", "reason": "rich premium"},
+        {"symbol": "DIA", "reason": "rich premium"},
     ]})
     choice = choose_universe(provider, MARKET)
-    assert choice.symbols == ("NVDA", "SPY", "TSLA")
+    assert choice.symbols == ("QQQ", "SPY", "DIA")
     assert choice.decided_by == "scout"
     assert "IV 1.55x realised" in choice.explain()
 
@@ -91,8 +91,12 @@ def test_scout_survives_a_dead_provider():
 
 
 def test_scout_respects_the_cap():
-    provider = Canned({"picks": [{"symbol": s, "reason": "r"} for s in TRADEABLE_UNIVERSE]})
-    assert len(choose_universe(provider, MARKET, max_names=4).symbols) == 4
+    """The cap binds when the agent offers more than it may take. With the
+    universe now restricted to the three validated names, the cap is tested
+    against a list longer than the universe rather than against the universe."""
+    offered = list(TRADEABLE_UNIVERSE) + ["NVDA", "TSLA", "META", "AMD"]
+    provider = Canned({"picks": [{"symbol": s, "reason": "r"} for s in offered]})
+    assert len(choose_universe(provider, MARKET, max_names=2).symbols) == 2
 
 
 def test_no_agent_means_the_designed_universe():
@@ -428,3 +432,31 @@ def test_the_names_the_research_supports_are_still_tradeable():
 
     for name in ("SPY", "QQQ", "DIA"):
         assert name in TRADEABLE_UNIVERSE
+
+
+def test_the_scout_may_only_pick_names_the_research_validated():
+    """The desk trades what it has tested. SPY, QQQ and DIA each cleared t>2
+    over 900 days; IWM was tested and failed; everything else was never tested
+    at all. NVDA passed every gate legitimately and lost twice — but two trades
+    prove nothing either way, and that is the point: the case against it is the
+    absence of evidence, not the presence of a loss."""
+    from aperture.agents import TRADEABLE_UNIVERSE
+
+    assert set(TRADEABLE_UNIVERSE) == {"SPY", "QQQ", "DIA"}
+
+
+def test_an_untested_name_cannot_be_chosen_however_attractive():
+    from aperture.agents import TRADEABLE_UNIVERSE, choose_universe
+
+    class Canned:
+        def complete(self, *, system, user, tier="fast", json_schema=None):
+            import json
+            return json.dumps({"picks": [
+                {"symbol": "NVDA", "reason": "IV 1.55x realised, very rich"},
+                {"symbol": "SPY", "reason": "liquid"},
+                {"symbol": "QQQ", "reason": "liquid"},
+            ]})
+
+    choice = choose_universe(Canned(), [{"symbol": "SPY", "spot": 1.0}])
+    assert "NVDA" not in choice.symbols
+    assert set(choice.symbols) <= set(TRADEABLE_UNIVERSE)
