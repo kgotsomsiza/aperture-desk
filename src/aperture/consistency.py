@@ -372,6 +372,32 @@ def check_declared_dependencies_are_installed() -> list[Finding]:
     return findings
 
 
+def check_every_strategy_is_funded() -> list[Finding]:
+    """A strategy the allocator has never heard of gets a budget of zero.
+
+    `warden.budgets` is replaced wholesale by the allocator every cycle, so
+    funding a sleeve anywhere else is decorative. CONVEX was funded in
+    `runner._budgets`, absent from `PRIOR_WEIGHTS`, and silently skipped for
+    three live sessions: healthy container, passing tests, zero trades.
+    """
+    findings = []
+    try:
+        from .loop import PRIOR_WEIGHTS, build_strategies
+    except Exception:  # noqa: BLE001 - import problems surface elsewhere
+        return findings
+    for strategy in build_strategies():
+        sid = strategy.config.strategy_id
+        if sid not in PRIOR_WEIGHTS:
+            findings.append(Finding(
+                "strategy-funding",
+                f"{sid} is a live strategy with no weight in PRIOR_WEIGHTS, "
+                "so the allocator will give it a budget of zero and it will "
+                "never propose",
+                "add it to PRIOR_WEIGHTS in loop.py",
+            ))
+    return findings
+
+
 ALL_CHECKS = (
     check_events_are_registered,
     check_public_events_survive_redaction,
@@ -380,6 +406,7 @@ ALL_CHECKS = (
     check_modules_are_documented,
     check_agents_are_documented,
     check_declared_dependencies_are_installed,
+    check_every_strategy_is_funded,
 )
 
 

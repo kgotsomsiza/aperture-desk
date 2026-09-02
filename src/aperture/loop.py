@@ -1362,7 +1362,13 @@ def main(argv: list[str] | None = None) -> int:
 
 # The designed barbell, as shares of the total risk budget. These are the
 # allocator's prior, not a fixed schedule: from here the desk funds what works.
-PRIOR_WEIGHTS = {"CARRY": 0.64, "CRUSH": 0.18, "DRIFT": 0.18}
+# The allocator's designed weights. This dict is the real source of funding:
+# `warden.budgets` is REPLACED wholesale by the allocator each cycle, so a
+# strategy missing here silently gets a budget of zero and never proposes,
+# however healthy it looks. CONVEX was funded in runner._budgets and absent
+# here, and was skipped for three sessions before anyone noticed.
+# tests/test_consistency.py now fails if a live strategy has no weight.
+PRIOR_WEIGHTS = {"CARRY": 0.55, "CRUSH": 0.15, "DRIFT": 0.18, "CONVEX": 0.12}
 
 
 def _priors(state: DeskState) -> dict[str, float]:

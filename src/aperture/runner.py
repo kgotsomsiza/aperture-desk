@@ -351,6 +351,7 @@ def _budgets(equity: float) -> dict[str, float]:
         "DRIFT": equity * 0.05,
         # The convex sleeve is the desk's right tail. Its whole budget is
         # premium paid, so this number is also the most it can ever lose.
+        # Only the opening budget: loop.PRIOR_WEIGHTS governs from cycle one.
         "CONVEX": equity * 0.05,
     }
 

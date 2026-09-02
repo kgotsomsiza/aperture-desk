@@ -128,3 +128,10 @@ def test_checks_that_need_missing_files_skip_rather_than_fail(monkeypatch, tmp_p
     monkeypatch.setattr(consistency, "HANDOFF", tmp_path / "absent.md")
     consistency.check_agents_are_documented()
     consistency.check_documented_test_count(1)
+
+
+def test_every_live_strategy_has_a_budget():
+    """CONVEX ran for three sessions with a zero budget because the allocator
+    had no weight for it. Nothing failed; it simply never traded."""
+    findings = consistency.check_every_strategy_is_funded()
+    assert not findings, "\n\n" + _report(findings)
