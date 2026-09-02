@@ -81,10 +81,17 @@ class ConvexStrategy:
         if not self.config.enabled or budget <= 0:
             return []
 
-        # The agents own the decision to be long convexity; this asks, it does
-        # not assume. Selling premium and buying it at once is incoherent.
-        if self.posture == "sell_premium":
-            return []
+        # Only a full stand-down silences this sleeve.
+        #
+        # This used to also stand down on `sell_premium`, on the reasoning that
+        # selling premium and buying it at once is incoherent. That was wrong,
+        # and wrong in exactly the way the 0.98 IV gate was wrong: it judges a
+        # shape instrument on value. Selling premium in the core while buying a
+        # cheap tail is a barbell, which is how books are actually built -- the
+        # condor's gain is small and capped, the strangle's is uncapped, and on
+        # a large move the second dwarfs the first. The IV/realised ceiling
+        # above is already the value filter; this gate was redundant and cost
+        # the sleeve a third session.
         if self.posture == "stand_down":
             return []
 

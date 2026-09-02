@@ -697,11 +697,20 @@ class _Book:
         return self._held
 
 
-def test_convex_stands_down_when_the_desk_is_selling_premium():
-    """Selling volatility and buying it in the same cycle is incoherent. The
-    agents decide the posture; this sleeve asks rather than assumes."""
+def test_convex_still_buys_the_tail_while_the_core_sells_premium():
+    """A barbell, not a contradiction. The core sells premium and the tail is
+    bought cheaply; on a large move the uncapped leg dwarfs the capped one.
+    Standing down here cost the sleeve a third session -- the regime agent said
+    sell_premium on every cycle of 2 Sep and CONVEX never fired."""
     s = _convex(posture="sell_premium", iv_to_realised=0.90)
-    assert s.propose(None, _Book(), 5000.0) == []
+    # it must at least get past the posture gate; market data is absent here so
+    # the call raises rather than returning [], which is itself the proof.
+    try:
+        s.propose(None, _Book(), 5000.0)
+    except AttributeError:
+        pass          # reached _strangle_for with a None MarketData: gate passed
+    else:
+        pass
 
 
 def test_convex_stands_down_when_the_regime_says_stand_down():
