@@ -110,3 +110,13 @@ def test_identity_is_still_never_publishable():
     assert not set(AUDIT_FIELDS) & set(FORBIDDEN_KEYS)
     for field in ("account_number", "account_id", "api_key", "secret"):
         assert field not in AUDIT_FIELDS
+
+
+def test_every_designed_sleeve_appears_on_the_public_roster():
+    """CONVEX held 30% of capital and an open position while being invisible on
+    the public page, because the roster was a hardcoded three-name tuple."""
+    from aperture.loop import PRIOR_WEIGHTS
+    from aperture.snapshot import _designed_strategies
+
+    assert set(_designed_strategies()) == set(PRIOR_WEIGHTS)
+    assert "CONVEX" in _designed_strategies()

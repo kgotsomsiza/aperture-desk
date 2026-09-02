@@ -60,6 +60,20 @@ AUDIT_FIELDS = (
 PUBLIC_MODES = {"demo", "practice", "scoring", "final"}
 
 
+def _designed_strategies() -> tuple[str, ...]:
+    """The desk's designed sleeves, taken from the allocator's own weights.
+
+    This used to be a hardcoded ("CARRY", "CRUSH", "DRIFT"), and CONVEX was
+    invisible on the public page while holding 30% of capital and an open
+    position -- the one sleeve carrying the desk's tournament thesis, absent
+    from the board a judge actually reads. Derived now, so adding a strategy
+    cannot leave it unshown.
+    """
+    from .loop import PRIOR_WEIGHTS  # local import: loop imports this module
+
+    return tuple(PRIOR_WEIGHTS)
+
+
 def _clean(value: Any) -> Any:
     if isinstance(value, str) and len(value) > 400:
         return value[:400]
@@ -216,7 +230,7 @@ class Snapshot:
                 "status": "funded",
                 "weight": self.state.allocations.get(strategy),
             }
-            for strategy in ("CARRY", "CRUSH", "DRIFT")
+            for strategy in _designed_strategies()
         ]
         for record in self.state.hired_strategies:
             rows.append({
