@@ -70,18 +70,40 @@ async function fetchJson(url, timeoutMs = 5_000) {
   }
 }
 
+// Once a real snapshot has been shown, the demo must never appear again.
+// A 5s timeout on a live API is a routine thing to miss, and falling back to
+// sample data on a blip meant the page briefly displayed +1.842% while the
+// desk was actually down 0.861%. Fabricated performance shown as live, to
+// whoever happened to refresh at that moment.
+let liveSeen = false;
+
 async function loadSnapshot() {
-  try {
-    const payload = await fetchJson(API_URL);
-    render(payload, "published");
-  } catch {
+  // One retry first: a single slow response is not evidence the desk is down.
+  for (const timeout of [5_000, 9_000]) {
     try {
-      const demo = await fetchJson(DEMO_URL);
-      render(demo, "demo");
+      const payload = await fetchJson(API_URL, timeout);
+      liveSeen = true;
+      render(payload, "published");
+      return;
     } catch {
-      setText("desk-state", "DATA UNAVAILABLE");
-      setText("freshness-label", "Snapshot unavailable");
+      /* try again, then decide */
     }
+  }
+
+  if (liveSeen) {
+    // We know this desk is real and publishing. Say the connection failed --
+    // never quietly substitute numbers that were never earned.
+    setText("desk-state", "RECONNECTING");
+    setText("freshness-label", "Live snapshot unreachable; showing last known values");
+    return;
+  }
+
+  try {
+    const demo = await fetchJson(DEMO_URL);
+    render(demo, "demo");
+  } catch {
+    setText("desk-state", "DATA UNAVAILABLE");
+    setText("freshness-label", "Snapshot unavailable");
   }
 }
 
