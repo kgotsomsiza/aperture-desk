@@ -163,14 +163,41 @@ class DeskState:
 
     # -- bookkeeping ------------------------------------------------------ #
 
-    def observe_equity(self, equity: float, today: date) -> None:
+    def observe_equity(
+        self,
+        equity: float,
+        today: date,
+        *,
+        prior_close_equity: float | None = None,
+    ) -> None:
+        """Record equity without mistaking the first intraday mark for the open.
+
+        Alpaca's ``last_equity`` is the prior session's official close.  That is
+        the baseline a daily-loss breaker needs: using the first runner sample of
+        a new date silently erases any overnight or opening-auction loss.
+
+        ``prior_close_equity`` remains optional for simulations and old callers,
+        but a valid broker value always wins over the locally sampled fallback.
+        """
         stamp = today.isoformat()
         if self.start_equity <= 0:
             self.start_equity = equity
         if self.day_stamp != stamp:
             self.day_stamp = stamp
-            self.day_start_equity = equity
-        self.high_water_mark = max(self.high_water_mark, equity)
+            self.day_start_equity = (
+                prior_close_equity
+                if prior_close_equity is not None and prior_close_equity > 0
+                else equity
+            )
+        elif prior_close_equity is not None and prior_close_equity > 0:
+            # Repair a process that already sampled this session using the old
+            # first-observation behaviour.  ``last_equity`` is stable intraday.
+            self.day_start_equity = prior_close_equity
+        self.high_water_mark = max(
+            self.high_water_mark,
+            equity,
+            prior_close_equity or 0.0,
+        )
 
     def record_open(self, trade: OpenTrade) -> None:
         self.open_trades[trade.client_order_id] = trade

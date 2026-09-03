@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,10 @@ from .risk import (
 
 log = logging.getLogger(__name__)
 
-KILL_SWITCH = Path("KILL_SWITCH")
+# The deployment volume is mounted at ``state``.  Keeping the halt there means a
+# host replacement cannot silently revive a desk whose kill switch was engaged.
+KILL_SWITCH = Path(os.environ.get("APERTURE_KILL_SWITCH", "state/KILL_SWITCH"))
+LEGACY_KILL_SWITCH = Path("KILL_SWITCH")
 
 
 @dataclass
@@ -168,15 +172,18 @@ class RiskWarden:
     # ------------------------------------------------------------------ #
 
     def halted(self) -> bool:
-        return KILL_SWITCH.exists()
+        return KILL_SWITCH.exists() or LEGACY_KILL_SWITCH.exists()
 
     def engage_kill_switch(self, reason: str) -> None:
+        KILL_SWITCH.parent.mkdir(parents=True, exist_ok=True)
         KILL_SWITCH.write_text(f"{datetime.now(timezone.utc).isoformat()} {reason}\n")
         self.audit.record("kill_switch", reason=reason)
         log.critical("KILL SWITCH ENGAGED: %s", reason)
 
     def release_kill_switch(self) -> None:
         KILL_SWITCH.unlink(missing_ok=True)
+        if LEGACY_KILL_SWITCH != KILL_SWITCH:
+            LEGACY_KILL_SWITCH.unlink(missing_ok=True)
         self.audit.record("kill_switch_released")
 
     def breached(self, book: BookState) -> str | None:

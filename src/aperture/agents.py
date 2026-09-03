@@ -290,6 +290,11 @@ Look for: an event the structure is not priced for; a payoff that does not match
 the stated intent; a signal the recent move has already priced in; strikes,
 width or expiry chosen badly for the thesis.
 
+Use only facts present in the proposal and context. Do not invent an event,
+days-to-expiry, delta, probability, standard deviation or payoff direction. If
+the supplied facts are insufficient to substantiate an objection, set
+kill=false; uncertainty is not a concrete reason to veto.
+
 Do NOT object that a trade is directional when its stated intent is directional,
 or that it is short volatility when it is meant to be. That is the strategy, and
 arguing with it is arguing with the desk rather than with the trade. If a
@@ -323,6 +328,9 @@ STRATEGY_INTENT: dict[str, str] = {
     "DRIFT": ("express post-earnings announcement drift with a defined-risk debit "
               "spread: the market under-reacts to a surprise and the move continues. "
               "DIRECTIONAL ON PURPOSE -- that is the thesis, not a flaw."),
+    "CONVEX": ("buy a defined-risk long index strangle whose maximum loss is the "
+               "premium paid, seeking a large move in either direction. Long "
+               "volatility and positive convexity are the thesis, not flaws."),
 }
 
 

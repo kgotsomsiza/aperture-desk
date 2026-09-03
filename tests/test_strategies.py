@@ -50,6 +50,18 @@ def snap(strike: float, right: Right, bid: float, ask: float, delta: float | Non
     )
 
 
+def test_strategy_instances_do_not_share_mutable_default_configs():
+    from aperture.strategies.carry import CarryStrategy
+    from aperture.strategies.convex import ConvexStrategy
+    from aperture.strategies.crush import CrushStrategy
+    from aperture.strategies.drift import DriftStrategy
+
+    for factory in (CarryStrategy, ConvexStrategy, CrushStrategy, DriftStrategy):
+        first = factory()
+        second = factory()
+        assert first.config is not second.config
+
+
 # --------------------------------------------------------------------------- #
 # Snapshot parsing
 # --------------------------------------------------------------------------- #

@@ -47,7 +47,7 @@ DEFAULT_CONFIG = StrategyConfig(
 
 @dataclass
 class CarryStrategy:
-    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG)
+    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG.child())
 
     def propose(self, md: MarketData, book: BookState, budget: float) -> list[Proposal]:
         if not self.config.enabled or budget <= 0:

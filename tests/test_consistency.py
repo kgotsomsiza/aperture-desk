@@ -135,3 +135,9 @@ def test_every_live_strategy_has_a_budget():
     had no weight for it. Nothing failed; it simply never traded."""
     findings = consistency.check_every_strategy_is_funded()
     assert not findings, "\n\n" + _report(findings)
+
+
+def test_every_live_strategy_has_exit_and_sleeve_config():
+    """Funding alone did not catch CONVEX falling through to CARRY on exits."""
+    findings = consistency.check_every_strategy_has_runtime_config()
+    assert not findings, "\n\n" + _report(findings)

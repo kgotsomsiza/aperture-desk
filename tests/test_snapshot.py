@@ -8,6 +8,51 @@ import pytest
 from aperture.snapshot import publish_remote
 
 
+def test_equity_curve_removes_large_external_cash_adjustments():
+    from aperture.snapshot import _cash_flow_adjusted_curve
+
+    curve = _cash_flow_adjusted_curve(
+        [1_787_923_800, 1_788_183_000, 1_788_186_600, 1_788_446_200],
+        [100_000.0, 200_000.0, 200_160.0, 197_630.0],
+        base_value=100_000.0,
+    )
+
+    assert [point["equity"] for point in curve] == [
+        100_000.0,
+        100_000.0,
+        100_160.0,
+        97_630.0,
+    ]
+
+
+def test_public_day_return_prefers_broker_prior_close(tmp_path):
+    from aperture.snapshot import Snapshot
+    from aperture.state import DeskState
+    from aperture.warden import AuditLog
+
+    class Broker:
+        def account(self):
+            return {"equity": "97_000", "last_equity": "99_000"}
+
+        def positions(self):
+            return []
+
+        def portfolio_history(self, period="1W", timeframe="1H"):
+            return {"timestamp": [], "equity": [], "base_value": 100_000}
+
+    state = DeskState(path=tmp_path / "desk.json")
+    state.start_equity = 100_000.0
+    state.day_start_equity = 95_000.0  # stale first-observation value
+    state.high_water_mark = 100_000.0
+    payload = Snapshot(
+        state=state,
+        audit=AuditLog(path=tmp_path / "audit.jsonl"),
+        cli=Broker(),
+    ).build()
+
+    assert payload["day_pnl_pct"] == pytest.approx(-2.02, abs=0.001)
+
+
 def public_payload():
     return {
         "schema_version": 1,

@@ -19,6 +19,7 @@ from aperture.agents import (
     TRADEABLE_UNIVERSE,
     call_regime,
     choose_universe,
+    intent_for,
     rank_proposals,
     red_team,
 )
@@ -190,6 +191,12 @@ def test_red_team_fails_open_so_an_outage_cannot_halt_trading():
     assert not red_team(Broken(), "sell SPY condor", {}).killed
     assert not red_team(Canned("not json at all"), "sell SPY condor", {}).killed
     assert not red_team(NullProvider(), "sell SPY condor", {}).killed
+
+
+def test_convex_red_team_context_describes_a_long_volatility_trade():
+    intent = intent_for("CONVEX")
+    assert "long index strangle" in intent
+    assert "premium paid" in intent
 
 
 # --------------------------------------------------------------------------- #

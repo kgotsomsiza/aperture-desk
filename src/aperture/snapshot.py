@@ -80,6 +80,45 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _cash_flow_adjusted_curve(
+    stamps: list[Any], values: list[Any], *, base_value: float
+) -> list[dict[str, Any]]:
+    """Remove account funding/reset jumps from broker portfolio history.
+
+    Alpaca's equity series includes non-trading cash adjustments.  A paper-account
+    reset therefore looked like a 100% gain on the public chart even though the
+    account summary correctly showed a loss.  The desk's defined-risk cap makes
+    an instantaneous 50% move impossible through its own trades, so discontinuities
+    that large are treated as external cash flow and carried as an offset.
+    """
+    points: list[dict[str, Any]] = []
+    offset = 0.0
+    previous: float | None = None
+    anchor = abs(base_value)
+
+    for ts, raw in zip(stamps, values):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+            continue
+        try:
+            stamp = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+
+        adjusted = float(raw) - offset
+        if previous is not None:
+            threshold = max(abs(previous) * 0.50, anchor * 0.50, 1.0)
+            jump = adjusted - previous
+            if abs(jump) >= threshold:
+                offset += jump
+                adjusted = previous
+
+        if adjusted > 0:
+            points.append({"t": stamp, "equity": round(adjusted, 2)})
+            previous = adjusted
+
+    return points
+
+
 @dataclass
 class Snapshot:
     state: DeskState
@@ -104,7 +143,7 @@ class Snapshot:
             "equity": round(equity, 2),
             "start_equity": round(start, 2),
             "total_return_pct": round((equity / start - 1) * 100, 3) if start else 0.0,
-            "day_pnl_pct": round(self._day_pnl(equity) * 100, 3),
+            "day_pnl_pct": round(self._day_pnl(equity, account) * 100, 3),
             "high_water_mark": round(self.state.high_water_mark, 2),
             "drawdown_pct": round(self._drawdown(equity) * 100, 3),
             "open_risk": round(sum(self.state.open_risk_by_underlying().values()), 2),
@@ -139,8 +178,13 @@ class Snapshot:
             log.warning("snapshot could not read the account: %s", exc.stderr[:120])
             return {}
 
-    def _day_pnl(self, equity: float) -> float:
-        base = self.state.day_start_equity
+    def _day_pnl(self, equity: float, account: dict[str, Any] | None = None) -> float:
+        account = account or {}
+        try:
+            broker_base = float(account.get("last_equity") or 0.0)
+        except (TypeError, ValueError):
+            broker_base = 0.0
+        base = broker_base or self.state.day_start_equity
         return (equity - base) / base if base > 0 else 0.0
 
     def _drawdown(self, equity: float) -> float:
@@ -209,11 +253,11 @@ class Snapshot:
         # it existed, and reports profit_loss against base_value across that gap —
         # so a day-old account shows a -100% curve that never happened. Points at
         # or below zero are that artifact, not a drawdown, and are dropped.
-        points = [
-            {"t": datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat(), "equity": v}
-            for ts, v in zip(stamps, values)
-            if isinstance(v, (int, float)) and v > 0
-        ]
+        points = _cash_flow_adjusted_curve(
+            stamps,
+            values,
+            base_value=float(history.get("base_value") or self.state.start_equity or 0.0),
+        )
         if not points:
             log.info("equity curve is empty: the account has no priced history yet")
         return points

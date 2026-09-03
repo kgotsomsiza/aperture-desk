@@ -208,6 +208,28 @@ def test_day_start_equity_resets_on_a_new_session(tmp_path):
     assert state.day_start_equity == 103_000.0  # rebased next session
 
 
+def test_broker_prior_close_is_the_daily_baseline_and_repairs_an_early_sample(tmp_path):
+    state = DeskState(path=tmp_path / "d.json")
+
+    state.observe_equity(
+        96_000.0,
+        date(2026, 9, 3),
+        prior_close_equity=98_851.93,
+    )
+    assert state.day_start_equity == pytest.approx(98_851.93)
+    assert state.high_water_mark == pytest.approx(98_851.93)
+
+    # Even if this process already observed the date, Alpaca's stable official
+    # close repairs any baseline persisted by an older runner build.
+    state.day_start_equity = 96_000.0
+    state.observe_equity(
+        97_000.0,
+        date(2026, 9, 3),
+        prior_close_equity=98_851.93,
+    )
+    assert state.day_start_equity == pytest.approx(98_851.93)
+
+
 def test_risk_views_aggregate_by_strategy_and_underlying(tmp_path):
     state = DeskState(path=tmp_path / "d.json")
     state.record_open(trade(client_order_id="a", max_loss=700.0))
@@ -325,6 +347,20 @@ def test_expired_unfilled_entry_is_not_scored_as_a_closed_trade(tmp_path):
     assert state.closed == []
     assert result["entries_unfilled"] == 1
     assert audit.tail()[-1]["event"] == "entry_unfilled"
+
+
+@pytest.mark.parametrize("status", ["done_for_day", "replaced", "calculated"])
+def test_other_broker_terminal_states_release_an_unfilled_reservation(tmp_path, status):
+    pending = trade(status="pending_entry", order_id="o1")
+    state, audit, result = sync_pending(
+        tmp_path,
+        pending,
+        {"status": status, "filled_qty": "0", "limit_price": "-1.50"},
+    )
+
+    assert state.open_trades == {}
+    assert result["entries_unfilled"] == 1
+    assert audit.tail()[-1]["order_status"] == status
 
 
 def test_filled_entry_uses_actual_price_and_fill_time(tmp_path):
@@ -859,6 +895,16 @@ def test_crush_invalid_timestamp_fails_safe_to_close():
 
     broken = trade(strategy_id="CRUSH", filled_at="not-a-time")
     assert "fail-safe" in exit_reason(broken, -1.0, today=date(2026, 9, 1))
+
+
+def test_convex_uses_its_own_exit_contract_and_has_no_half_debit_stop():
+    from aperture.loop import _config_for, exit_reason
+    from aperture.strategies.convex import DEFAULT_CONFIG as CONVEX_CONFIG
+
+    convex_trade = trade(strategy_id="CONVEX", net_price=1.00)
+    assert _config_for("CONVEX") is CONVEX_CONFIG
+    assert exit_reason(convex_trade, 0.49) is None
+    assert "take profit" in exit_reason(convex_trade, 2.51)
 
 
 def test_closing_an_iron_condor_keeps_all_four_legs_together():

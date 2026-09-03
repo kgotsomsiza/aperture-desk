@@ -68,7 +68,7 @@ DEFAULT_CONFIG = StrategyConfig(
 
 @dataclass
 class CrushStrategy:
-    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG)
+    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG.child())
     calendar: EarningsCalendar = field(default_factory=EarningsCalendar)
 
     def propose(self, md: MarketData, book: BookState, budget: float) -> list[Proposal]:

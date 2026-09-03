@@ -87,7 +87,7 @@ def sessions_since(bars: Sequence[dict[str, Any]], event: EarningsEvent) -> int:
 
 @dataclass
 class DriftStrategy:
-    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG)
+    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG.child())
     calendar: EarningsCalendar = field(default_factory=EarningsCalendar)
     cohort: tuple[EarningsEvent, ...] = RECENTLY_REPORTED
 
@@ -223,6 +223,14 @@ def exit_signal(entry_debit: float, current_price: float, config: StrategyConfig
 
     if value >= debit * (1 + config.take_profit_pct):
         return f"take profit: worth {value:.2f} against a {debit:.2f} debit"
-    if value <= debit * 0.5:
-        return f"stop loss: worth {value:.2f}, half the {debit:.2f} debit is gone"
+    # A positive multiple means "close after this fraction of the debit is
+    # left" (2x -> one half).  Zero explicitly disables a mark-based stop for
+    # structures such as CONVEX whose maximum loss is already the premium paid.
+    if config.stop_loss_multiple > 0:
+        floor = debit / config.stop_loss_multiple
+        if value <= floor:
+            return (
+                f"stop loss: worth {value:.2f}, below the {floor:.2f} floor "
+                f"for a {debit:.2f} debit"
+            )
     return None

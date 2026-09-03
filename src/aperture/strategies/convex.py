@@ -82,7 +82,7 @@ MAX_TRADE_LOSS_PCT = 0.036
 class ConvexStrategy:
     """Buys a defined-risk long strangle when movement is cheap."""
 
-    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG)
+    config: StrategyConfig = field(default_factory=lambda: DEFAULT_CONFIG.child())
     iv_to_realised: float | None = None   # set each cycle by the loop
     posture: str = "balanced"             # what the regime agent decided
 

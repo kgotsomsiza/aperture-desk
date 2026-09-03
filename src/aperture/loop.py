@@ -102,7 +102,17 @@ DEADLINE = SCORING_CLOSE  # what the tournament clock scales against
 # through a blanket liquidation. Exits, circuit breakers and the kill switch are
 # untouched: those still close positions, and should.
 
-TERMINAL_ORDER_STATUSES = {"canceled", "expired", "rejected"}
+TERMINAL_ORDER_STATUSES = {
+    "canceled",
+    "expired",
+    "rejected",
+    # Alpaca can use these after a DAY order has stopped executing.  Leaving
+    # one unrecognised reserves risk forever and makes the ledger disagree with
+    # an empty broker order book.
+    "done_for_day",
+    "replaced",
+    "calculated",
+}
 
 
 def build_strategies(state: DeskState | None = None) -> list[Strategy]:
@@ -133,7 +143,15 @@ def build_book(
     )
 
     equity = float(account.get("equity") or 0.0)
-    state.observe_equity(equity, now.date())
+    try:
+        prior_close_equity = float(account.get("last_equity") or 0.0)
+    except (TypeError, ValueError):
+        prior_close_equity = 0.0
+    state.observe_equity(
+        equity,
+        now.date(),
+        prior_close_equity=prior_close_equity or None,
+    )
 
     return BookState(
         equity=equity,
@@ -397,9 +415,13 @@ def run_cycle(
                 continue
             verdicts.append(red_team(agent, proposal.rationale, {
                 "intent": intent_for(proposal.strategy_id),
+                "as_of": book.now.isoformat(),
+                "measurement_deadline": DEADLINE.isoformat(),
                 "underlying": proposal.underlying,
                 "structure_legs": len(proposal.legs),
                 "net_price": proposal.net_price,
+                "price_direction": "debit" if proposal.net_price > 0 else "credit",
+                "maximum_loss": analyse_payoff(proposal).max_loss,
                 "posture_today": regime.posture,
             }))
         unchallenged = sum(1 for v in verdicts if v.decided_by == "budget")
@@ -1288,6 +1310,7 @@ def _config_for(strategy_id: str):
         "CARRY": carry.DEFAULT_CONFIG,
         "CRUSH": crush.DEFAULT_CONFIG,
         "DRIFT": drift.DEFAULT_CONFIG,
+        "CONVEX": convex.DEFAULT_CONFIG,
     }.get(strategy_id, carry.DEFAULT_CONFIG)
 
 

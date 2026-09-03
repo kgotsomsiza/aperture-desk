@@ -398,6 +398,30 @@ def check_every_strategy_is_funded() -> list[Finding]:
     return findings
 
 
+def check_every_strategy_has_runtime_config() -> list[Finding]:
+    """Exit and breach handling must resolve the strategy that opened a trade.
+
+    A strategy can be built and funded successfully while still being absent
+    from the exit registry.  In that case it silently inherits CARRY's policy
+    and sleeve, which is exactly how CONVEX escaped emergency de-risking.
+    """
+    findings = []
+    try:
+        from .loop import _config_for, build_strategies
+    except Exception:  # noqa: BLE001 - import problems surface elsewhere
+        return findings
+    for strategy in build_strategies():
+        sid = strategy.config.strategy_id
+        resolved = _config_for(sid)
+        if resolved.strategy_id != sid:
+            findings.append(Finding(
+                "strategy-config",
+                f"{sid} is live but resolves to {resolved.strategy_id}'s exit and sleeve config",
+                "add the strategy to loop._config_for",
+            ))
+    return findings
+
+
 ALL_CHECKS = (
     check_events_are_registered,
     check_public_events_survive_redaction,
@@ -407,6 +431,7 @@ ALL_CHECKS = (
     check_agents_are_documented,
     check_declared_dependencies_are_installed,
     check_every_strategy_is_funded,
+    check_every_strategy_has_runtime_config,
 )
 
 
